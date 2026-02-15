@@ -1,7 +1,4 @@
 import os
-# Reduce memory fragmentation and limit large allocations
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
-
 import argparse
 import json
 import torch
@@ -13,7 +10,7 @@ from src.vision_analyzer import VisionAnalyzer
 from src.models import VideoMetadata
 
 def cleanup_gpu():
-    """Aggressively clean up GPU memory."""
+    """Aggressively clean up GPU memory (mostly for Whisper/Torch)."""
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
@@ -49,10 +46,15 @@ def process_batch(video_paths: List[str], args):
             del transcriber
         cleanup_gpu()
 
-    # --- Stage 3: Vision Analysis (Qwen3-VL) ---
+    # --- Stage 3: Vision Analysis (GGUF via llama.cpp) ---
     print(f"\n>>> STAGE 3: Visual Analysis")
     try:
-        analyzer = VisionAnalyzer(model_id=args.vlm_model)
+        # Use GGUF model path
+        model_path = args.vlm_model
+        if not model_path.endswith(".gguf"):
+             model_path = "models/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf"
+             
+        analyzer = VisionAnalyzer(model_id=model_path)
         for meta in videos_metadata:
             print(f"Analyzing frames for: {os.path.basename(meta.video_path)}")
             if meta.transcription:
@@ -62,6 +64,7 @@ def process_batch(video_paths: List[str], args):
     finally:
         if 'analyzer' in locals():
             del analyzer
+        # llama-cpp-python usually cleans up on destructor, but explicit gc helps
         cleanup_gpu()
 
     # --- Stage 4: Saving Results ---
@@ -88,7 +91,7 @@ def main():
     parser = argparse.ArgumentParser(description="Batch Multimodal Video Analysis System")
     parser.add_argument("--input", type=str, required=True, help="Path to video file or directory")
     parser.add_argument("--output_dir", type=str, default="data/processed", help="Root directory for processed data")
-    parser.add_argument("--vlm_model", type=str, default="Qwen/Qwen3-VL-2B-Instruct", help="VLM model ID")
+    parser.add_argument("--vlm_model", type=str, default="models/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf", help="Path to GGUF model")
     parser.add_argument("--whisper_model", type=str, default="base", help="Whisper model size")
     parser.add_argument("--threshold", type=float, default=0.1, help="Scene detection threshold")
     parser.add_argument("--interval", type=float, default=30.0, help="Max interval between frames in seconds")
