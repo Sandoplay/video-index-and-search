@@ -1,75 +1,78 @@
 import torch
 from PIL import Image
-from transformers import Qwen3VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig
+from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
 from typing import List, Optional
 from .models import FrameMetadata
 
 class VisionAnalyzer:
-    def __init__(self, model_id: str = "Qwen/Qwen3-VL-8B-Instruct", load_in_4bit: bool = True):
+    def __init__(self, model_id: str = "Qwen/Qwen3-VL-2B-Instruct", load_in_4bit: bool = False):
         self.model_id = model_id
-        self.load_in_4bit = load_in_4bit
+        # We ignore load_in_4bit default to force native speed for small models
+        self.load_in_4bit = False 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self._model = None
         self._processor = None
 
     def _load_model(self):
         if self._model is None:
-            print(f"Loading VLM model: {self.model_id}...")
+            print(f"Loading VLM model: {self.model_id} (Native bfloat16)...")
             
-            bnb_config = None
-            if self.load_in_4bit and self.device == "cuda":
-                bnb_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_compute_dtype=torch.bfloat16,
-                    bnb_4bit_use_double_quant=True,
-                    bnb_4bit_quant_type="nf4",
-                )
-
-            # Optimization 1: Lower resolution limit (approx 360x360 to 480x480 range)
-            # This drastically reduces activation memory
+            # Using native bfloat16 without quantization for maximum speed
+            # The 2B model takes only ~4.5GB VRAM in fp16/bf16
+            
             self._processor = AutoProcessor.from_pretrained(
                 self.model_id, 
                 trust_remote_code=True,
-                min_pixels=256 * 28 * 28,
-                max_pixels=320 * 28 * 28 
+                min_pixels=128 * 28 * 28, 
+                max_pixels=256 * 28 * 28  
             )
             
-            # Optimization 2: Use SDPA (PyTorch's native efficient attention)
             self._model = Qwen3VLForConditionalGeneration.from_pretrained(
                 self.model_id,
                 torch_dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
-                quantization_config=bnb_config,
                 device_map={"": 0} if self.device == "cuda" else None,
                 trust_remote_code=True,
-                attn_implementation="sdpa" # Much more memory efficient than 'eager'
+                attn_implementation="sdpa"
             )
 
-    def analyze_frames(self, frames: List[FrameMetadata], transcription: str) -> List[FrameMetadata]:
-        """Analyzes each frame with the provided transcription context."""
+    def analyze_frames(self, frames: List[FrameMetadata], transcription: str, batch_size: int = 4) -> List[FrameMetadata]:
+        """
+        Analyzes frames in batches to provide video-level context and speed up processing.
+        """
         self._load_model()
         
-        # Aggressive context truncation
+        # Prepare context
         max_context_chars = 1500 
         context = transcription[:max_context_chars] + "..." if len(transcription) > max_context_chars else transcription
 
-        for frame in frames:
-            # Clear cache BEFORE processing to ensure max space for activations
+        # Process in chunks
+        for i in range(0, len(frames), batch_size):
+            batch = frames[i : i + batch_size]
+            
+            # Clean memory before batch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            image = Image.open(frame.path).convert("RGB")
+            print(f"Processing segment {i//batch_size + 1} (Frames {i+1}-{i+len(batch)})...")
+
+            # Load images
+            images = [Image.open(f.path).convert("RGB") for f in batch]
             
-            prompt_text = f"Context from audio: {context}\n\nTask: Describe what is happening in this frame."
+            # Formulate prompt for a SEQUENCE of images
+            content = []
+            for img in images:
+                content.append({"type": "image", "image": img})
             
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": image},
-                        {"type": "text", "text": prompt_text},
-                    ],
-                }
-            ]
+            # Prompt asking for a continuous description
+            prompt_text = (
+                f"Context from audio transcription: {context}\n\n"
+                f"These are {len(images)} consecutive frames from a video clip. "
+                "Describe the flow of events and actions shown across these frames as a coherent story. "
+                "Focus on what is happening and how the scene evolves."
+            )
+            content.append({"type": "text", "text": prompt_text})
+
+            messages = [{"role": "user", "content": content}]
             
             text = self._processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
@@ -77,16 +80,16 @@ class VisionAnalyzer:
             
             inputs = self._processor(
                 text=[text],
-                images=[image],
+                images=images,
                 padding=True,
                 return_tensors="pt",
             ).to(self.device)
 
-            # Optimization 3: use_cache=False saves VRAM (no KV cache) at cost of slightly slower generation
+            # Generate batch description
             with torch.no_grad():
                 generated_ids = self._model.generate(
                     **inputs, 
-                    max_new_tokens=128,
+                    max_new_tokens=256,
                     use_cache=False 
                 )
             
@@ -97,7 +100,10 @@ class VisionAnalyzer:
                 generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
             )[0]
             
-            frame.description = response.strip()
-            print(f"[{frame.timestamp:.2f}s] Analyzed: {frame.description[:80]}...")
+            description = response.strip()
+            print(f"Segment Description: {description[:100]}...\n")
+
+            for f in batch:
+                f.description = description
             
         return frames

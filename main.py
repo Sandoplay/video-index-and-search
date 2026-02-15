@@ -88,7 +88,7 @@ def main():
     parser = argparse.ArgumentParser(description="Batch Multimodal Video Analysis System")
     parser.add_argument("--input", type=str, required=True, help="Path to video file or directory")
     parser.add_argument("--output_dir", type=str, default="data/processed", help="Root directory for processed data")
-    parser.add_argument("--vlm_model", type=str, default="Qwen/Qwen3-VL-8B-Instruct", help="VLM model ID")
+    parser.add_argument("--vlm_model", type=str, default="Qwen/Qwen3-VL-2B-Instruct", help="VLM model ID")
     parser.add_argument("--whisper_model", type=str, default="base", help="Whisper model size")
     parser.add_argument("--threshold", type=float, default=0.1, help="Scene detection threshold")
     parser.add_argument("--interval", type=float, default=30.0, help="Max interval between frames in seconds")
