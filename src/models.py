@@ -5,6 +5,7 @@ from typing import List, Optional
 class FrameMetadata:
     path: str
     timestamp: float
+    index: int = 0
     description: Optional[str] = None
 
 @dataclass

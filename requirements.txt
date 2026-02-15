@@ -1,8 +1,3 @@
 torch
-ffmpeg-python
 openai-whisper
-transformers>=4.57.0
-accelerate
-bitsandbytes
-Pillow
-qwen-vl-utils
+requests

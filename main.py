@@ -26,7 +26,8 @@ def process_batch(video_paths: List[str], args):
         print(f"Processing: {os.path.basename(path)}")
         meta = processor.prepare_video_metadata(path)
         meta.audio_path = processor.extract_audio(path)
-        meta.frames = processor.extract_frames(path, scene_threshold=args.threshold, max_interval=args.interval)
+        # Use adaptive extraction
+        meta.frames = processor.extract_frames(path, max_frames=args.max_frames)
         videos_metadata.append(meta)
         print(f"  Done. Extracted {len(meta.frames)} frames.")
     
@@ -41,30 +42,31 @@ def process_batch(video_paths: List[str], args):
                 print(f"Transcribing audio for: {os.path.basename(meta.video_path)}")
                 meta.transcription = transcriber.transcribe(meta.audio_path)
     finally:
-        # Ensure model is deleted even if error occurs
         if 'transcriber' in locals():
             del transcriber
         cleanup_gpu()
 
-    # --- Stage 3: Vision Analysis (GGUF via llama.cpp) ---
-    print(f"\n>>> STAGE 3: Visual Analysis")
+    # --- Stage 3: Vision Analysis (GGUF via llama-server) ---
+    print(f"\n>>> STAGE 3: Visual Analysis & Summarization")
+    model_path = args.vlm_model
+    if not model_path.endswith(".gguf"):
+            model_path = "models/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf"
+            
     try:
-        # Use GGUF model path
-        model_path = args.vlm_model
-        if not model_path.endswith(".gguf"):
-             model_path = "models/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf"
-             
-        analyzer = VisionAnalyzer(model_id=model_path)
-        for meta in videos_metadata:
-            print(f"Analyzing frames for: {os.path.basename(meta.video_path)}")
-            if meta.transcription:
-                meta.frames = analyzer.analyze_frames(meta.frames, meta.transcription)
-            else:
-                meta.frames = analyzer.analyze_frames(meta.frames, "No audio context available.")
+        with VisionAnalyzer(model_id=model_path) as analyzer:
+            for meta in videos_metadata:
+                print(f"Analyzing frames for: {os.path.basename(meta.video_path)}")
+                
+                context_text = meta.transcription if meta.transcription else "No audio context available."
+                # batch_size=0 triggers auto-calculation
+                meta.frames = analyzer.analyze_frames(meta.frames, context_text, batch_size=args.batch_size)
+                
+                print(f"Generating summary for: {os.path.basename(meta.video_path)}")
+                meta.summary = analyzer.generate_video_summary(meta.frames, context_text)
+
+    except Exception as e:
+        print(f"Critical error during vision analysis: {e}")
     finally:
-        if 'analyzer' in locals():
-            del analyzer
-        # llama-cpp-python usually cleans up on destructor, but explicit gc helps
         cleanup_gpu()
 
     # --- Stage 4: Saving Results ---
@@ -77,6 +79,7 @@ def process_batch(video_paths: List[str], args):
             "video_path": meta.video_path,
             "duration": meta.duration,
             "transcription": meta.transcription,
+            "summary": getattr(meta, "summary", "Summary generation failed."),
             "analysis": [
                 {"timestamp": f.timestamp, "description": f.description, "frame_path": f.path} 
                 for f in meta.frames
@@ -93,8 +96,10 @@ def main():
     parser.add_argument("--output_dir", type=str, default="data/processed", help="Root directory for processed data")
     parser.add_argument("--vlm_model", type=str, default="models/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf", help="Path to GGUF model")
     parser.add_argument("--whisper_model", type=str, default="base", help="Whisper model size")
-    parser.add_argument("--threshold", type=float, default=0.1, help="Scene detection threshold")
-    parser.add_argument("--interval", type=float, default=30.0, help="Max interval between frames in seconds")
+    parser.add_argument("--threshold", type=float, default=0.1, help="Deprecated (adaptive)")
+    parser.add_argument("--interval", type=float, default=30.0, help="Deprecated (adaptive)")
+    parser.add_argument("--max_frames", type=int, default=50, help="Target max frames per video (adaptive)")
+    parser.add_argument("--batch_size", type=int, default=0, help="Number of frames to analyze at once (0 = auto)")
     
     args = parser.parse_args()
 
