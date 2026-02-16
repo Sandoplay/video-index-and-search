@@ -95,7 +95,7 @@ def main():
     parser.add_argument("--input", type=str, required=True, help="Path to video file or directory")
     parser.add_argument("--output_dir", type=str, default="data/processed", help="Root directory for processed data")
     parser.add_argument("--vlm_model", type=str, default="models/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf", help="Path to GGUF model")
-    parser.add_argument("--whisper_model", type=str, default="base", help="Whisper model size")
+    parser.add_argument("--whisper_model", type=str, default="large", help="Whisper model size")
     parser.add_argument("--threshold", type=float, default=0.1, help="Deprecated (adaptive)")
     parser.add_argument("--interval", type=float, default=30.0, help="Deprecated (adaptive)")
     parser.add_argument("--max_frames", type=int, default=50, help="Target max frames per video (adaptive)")

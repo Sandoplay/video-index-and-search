@@ -11,7 +11,7 @@ from .models import FrameMetadata
 
 class VisionAnalyzer:
     # Constants based on Qwen2.5-VL architecture and observation
-    CONTEXT_SIZE = 32768
+    CONTEXT_SIZE = 81920
     TOKENS_PER_IMAGE = 1300  # Approx ~1280 + overhead
     TOKENS_PER_TEXT_CHAR = 0.3 # Rough estimate
     RESERVE_TOKENS = 1500    # For system prompt, user text prompt, and generation output
@@ -124,9 +124,9 @@ class VisionAnalyzer:
             # Calculate how many images fit
             calc_batch = int(available_tokens / self.TOKENS_PER_IMAGE)
             
-            # Clamp to reasonable limits (1 to 25)
-            # 25 images is a lot of visual info, more might confuse the model regardless of tokens
-            batch_size = max(1, min(calc_batch, 25))
+            # Clamp to reasonable limits (1 to 60)
+            # 60 images fits within the 80k context with margin
+            batch_size = max(1, min(calc_batch, 60))
             print(f">>> Auto-selected batch size: {batch_size} (based on {self.CONTEXT_SIZE} ctx)")
 
         total_frames = len(frames)
