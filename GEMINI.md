@@ -6,7 +6,7 @@ This project is a high-performance, local AI system designed to analyze videos b
 
 The system processes video files to create structured metadata (JSON) containing:
 1.  **Audio Transcription:** Speech-to-text using OpenAI Whisper.
-2.  **Visual Analysis:** Chronological descriptions of video frames using the Qwen2.5-VL Vision-Language Model (VLM).
+2.  **Visual Analysis:** Chronological descriptions of video frames using the Qwen3-VL Vision-Language Model (VLM).
 3.  **Summary:** A cohesive summary of the entire video content.
 
 It is highly optimized for NVIDIA GPUs (specifically RTX 50-series Blackwell architecture) using CUDA-accelerated inference.
@@ -16,7 +16,7 @@ It is highly optimized for NVIDIA GPUs (specifically RTX 50-series Blackwell arc
 *   **Language:** Python 3.13
 *   **Media Processing:** FFmpeg (adaptive frame extraction).
 *   **Audio:** OpenAI Whisper (PyTorch).
-*   **Vision AI:** `llama.cpp` (server mode) running `Qwen2.5-VL-3B-Instruct` (GGUF format) with `mmproj` vision encoder.
+*   **Vision AI:** `llama.cpp` (server mode) running `Qwen3-VL-8B-Instruct` (Unsloth GGUF format) with `mmproj` vision encoder.
 *   **Inference:** CUDA 13.0+ optimized binaries for maximum throughput (~100-150 tokens/s generation).
 
 ## Architecture
@@ -51,8 +51,8 @@ The project relies on local binaries to ensure compatibility and performance:
 
 ### 3. Models (`models/`)
 Required GGUF files for the vision pipeline:
-*   `models/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf`: The main language model.
-*   `models/mmproj-model-f16.gguf`: The vision encoder (Projector) for Qwen2.5-VL.
+*   `models/Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf`: The main language model (Unsloth Quantized).
+*   `models/mmproj-Qwen3VL-8B-Instruct-F16.gguf`: The vision encoder (Projector) for Qwen3-VL.
 
 ## Running the System
 

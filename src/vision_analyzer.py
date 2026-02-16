@@ -11,14 +11,14 @@ from .models import FrameMetadata
 
 class VisionAnalyzer:
     # Constants based on Qwen2.5-VL architecture and observation
-    CONTEXT_SIZE = 81920
+    CONTEXT_SIZE = 50536 # Reduced for faster embedding and to fit VRAM
     TOKENS_PER_IMAGE = 1300  # Approx ~1280 + overhead
     TOKENS_PER_TEXT_CHAR = 0.3 # Rough estimate
     RESERVE_TOKENS = 1500    # For system prompt, user text prompt, and generation output
 
-    def __init__(self, model_id: str = "models/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf", load_in_4bit: bool = False):
+    def __init__(self, model_id: str = "models/Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf", load_in_4bit: bool = False):
         self.model_path = model_id
-        self.mmproj_path = "models/mmproj-model-f16.gguf"
+        self.mmproj_path = "models/mmproj-Qwen3VL-8B-Instruct-F16.gguf"
         self.server_process = None
         self.api_url = "http://127.0.0.1:8080/v1/chat/completions"
         self.torch_lib = os.path.join(os.getcwd(), ".venv", "Lib", "site-packages", "torch", "lib")
@@ -72,7 +72,12 @@ class VisionAnalyzer:
             "--parallel", "1"
         ]
         
-        self.server_process = subprocess.Popen(cmd, env=env)
+        # Windows-specific: Use CREATE_NEW_PROCESS_GROUP to allow sending signals safely
+        creationflags = 0
+        if os.name == 'nt':
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+
+        self.server_process = subprocess.Popen(cmd, env=env, creationflags=creationflags)
         
         print(">>> Waiting for model and vision encoder to load...")
         max_retries = 60
@@ -90,13 +95,12 @@ class VisionAnalyzer:
     def _stop_server(self):
         if self.server_process and not self.is_external_server:
             print(">>> Stopping llama-server...")
-            if os.name == 'nt':
-                os.kill(self.server_process.pid, signal.CTRL_BREAK_EVENT)
-            else:
-                self.server_process.terminate()
+            # Simple and effective termination for both Windows and Linux
+            self.server_process.terminate()
             try:
                 self.server_process.wait(timeout=5)
-            except:
+            except subprocess.TimeoutExpired:
+                print(">>> Force killing llama-server...")
                 self.server_process.kill()
             self.server_process = None
 
@@ -124,9 +128,9 @@ class VisionAnalyzer:
             # Calculate how many images fit
             calc_batch = int(available_tokens / self.TOKENS_PER_IMAGE)
             
-            # Clamp to reasonable limits (1 to 60)
-            # 60 images fits within the 80k context with margin
-            batch_size = max(1, min(calc_batch, 60))
+            # Clamp to reasonable limits (1 to 48)
+            # 48 images fits within the 64k context with margin
+            batch_size = max(1, min(calc_batch, 48))
             print(f">>> Auto-selected batch size: {batch_size} (based on {self.CONTEXT_SIZE} ctx)")
 
         total_frames = len(frames)

@@ -21,7 +21,7 @@ from llama_cpp import Llama
 def check_cuda():
     print("Checking llama-cpp-python CUDA support...")
     
-    model_path = "models/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf"
+    model_path = "models/Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf"
     
     if not os.path.exists(model_path):
         print("Model not found, cannot test load.")
