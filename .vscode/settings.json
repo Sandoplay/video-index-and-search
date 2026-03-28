@@ -1,0 +1,16 @@
+{
+    "terminal.integrated.env.windows": {
+        "PYTHONIOENCODING": "utf-8"
+    },
+    "terminal.integrated.profiles.windows": {
+        "PowerShell UTF-8 (Project)": {
+            "source": "PowerShell",
+            "args": [
+                "-NoExit",
+                "-Command",
+                "[console]::InputEncoding = [console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $OutputEncoding = [System.Text.Encoding]::UTF8"
+            ]
+        }
+    },
+    "terminal.integrated.defaultProfile.windows": "PowerShell UTF-8 (Project)"
+}

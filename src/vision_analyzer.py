@@ -144,7 +144,7 @@ class VisionAnalyzer:
             print(f"Processing Batch {current_batch_index}/{total_batches} (Frames {i+1}-{i+len(batch)})...")
             
             content = [
-                {"type": "text", "text": f"Audio context: {context_text}\n\nTask: Analyze these {len(batch)} video frames as a continuous sequence. Describe the events or actions shown."}
+                {"type": "text", "text": f"Audio context (may be auto-generated and contain noise/errors): {context_text}\n\nTask: Analyze these {len(batch)} video frames as a continuous sequence. Describe the events or actions shown. Use the audio context if it makes sense, but rely primarily on the visuals."}
             ]
             
             for frame in batch:
@@ -211,8 +211,8 @@ class VisionAnalyzer:
         events_text = "\n".join(unique_events)
         
         prompt = (
-            f"You are a video analyst. Based on the following visual timeline and audio transcription, "
-            f"write a comprehensive summary of the video.\n\n"
+            f"You are a video analyst. Based on the following visual timeline and an audio transcription (which may be auto-generated and contain errors), "
+            f"write a comprehensive summary of the video. Rely primarily on the visual timeline if the audio seems nonsensical.\n\n"
             f"=== Visual Timeline ===\n{events_text}\n\n"
             f"=== Audio Transcription ===\n{transcription}\n\n"
             f"=== Task ===\n"
