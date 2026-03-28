@@ -56,7 +56,7 @@ def process_batch(video_paths: List[str], args):
     print(f"\n>>> STAGE 3: Visual Analysis & Summarization")
     model_path = args.vlm_model
     if not model_path.endswith(".gguf"):
-            model_path = "models/Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf"
+            model_path = "models/Qwen3.5-9B-Q8_0.gguf"
             
     try:
         with VisionAnalyzer(model_id=model_path) as analyzer:
@@ -100,7 +100,7 @@ def main():
     parser = argparse.ArgumentParser(description="Batch Multimodal Video Analysis System")
     parser.add_argument("--input", type=str, required=True, help="Path to video file or directory")
     parser.add_argument("--output_dir", type=str, default="data/processed", help="Root directory for processed data")
-    parser.add_argument("--vlm_model", type=str, default="models/Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf", help="Path to GGUF model")
+    parser.add_argument("--vlm_model", type=str, default="models/Qwen3.5-9B-Q8_0.gguf", help="Path to GGUF model")
     parser.add_argument("--whisper_model", type=str, default="large", help="Whisper model size")
     parser.add_argument("--threshold", type=float, default=0.1, help="Deprecated (adaptive)")
     parser.add_argument("--interval", type=float, default=30.0, help="Deprecated (adaptive)")

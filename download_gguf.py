@@ -6,8 +6,8 @@ def download_model():
     os.makedirs(local_dir, exist_ok=True)
 
     # 1. Download Main Model (Unsloth)
-    repo_id_main = "unsloth/Qwen3-VL-8B-Instruct-GGUF"
-    filename_main = "Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf"
+    repo_id_main = "unsloth/Qwen3.5-9B-GGUF"
+    filename_main = "Qwen3.5-9B-Q8_0.gguf"
     
     print(f"Downloading {filename_main} from {repo_id_main}...")
     path_main = hf_hub_download(
@@ -19,8 +19,8 @@ def download_model():
     print(f"Main model downloaded to: {path_main}")
 
     # 2. Download Vision Projector (mmproj) - REQUIRED for Vision
-    repo_id_proj = "Qwen/Qwen3-VL-8B-Instruct-GGUF"
-    filename_proj = "mmproj-Qwen3VL-8B-Instruct-F16.gguf"
+    repo_id_proj = "unsloth/Qwen3.5-9B-GGUF"
+    filename_proj = "mmproj-F16.gguf"
 
     print(f"Downloading {filename_proj} from {repo_id_proj}...")
     path_proj = hf_hub_download(

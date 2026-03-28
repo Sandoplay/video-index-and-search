@@ -16,9 +16,9 @@ class VisionAnalyzer:
     TOKENS_PER_TEXT_CHAR = 0.3 # Rough estimate
     RESERVE_TOKENS = 1500    # For system prompt, user text prompt, and generation output
 
-    def __init__(self, model_id: str = "models/Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf", load_in_4bit: bool = False):
+    def __init__(self, model_id: str = "models/Qwen3.5-9B-Q8_0.gguf", load_in_4bit: bool = False):
         self.model_path = model_id
-        self.mmproj_path = "models/mmproj-Qwen3VL-8B-Instruct-F16.gguf"
+        self.mmproj_path = "models/mmproj-F16.gguf"
         self.server_process = None
         self.api_url = "http://127.0.0.1:8080/v1/chat/completions"
         self.torch_lib = os.path.join(os.getcwd(), ".venv", "Lib", "site-packages", "torch", "lib")
@@ -162,7 +162,7 @@ class VisionAnalyzer:
                     }
                 ],
                 "temperature": 0.1,
-                "max_tokens": 300
+                "max_tokens": 2048
             }
 
             start_time = time.time()
@@ -172,7 +172,12 @@ class VisionAnalyzer:
                 response.raise_for_status()
                 data = response.json()
                 
-                description = data["choices"][0]["message"]["content"].strip()
+                message = data["choices"][0]["message"]
+                description = message.get("content", "").strip()
+                reasoning = message.get("reasoning_content", "").strip()
+                
+                if not description and reasoning:
+                    description = f"[Thinking only, generation cut off]: {reasoning[:200]}..."
                 
                 elapsed = time.time() - start_time
                 tokens = data.get("usage", {}).get("completion_tokens", 0)
@@ -221,11 +226,14 @@ class VisionAnalyzer:
 
         payload = {
             "messages": [
-                {"role": "system", "content": "You are a helpful assistant."},
+                {
+                    "role": "system", 
+                    "content": "You are a helpful assistant. Provide the summary directly without outputting long thinking processes."
+                },
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.3,
-            "max_tokens": 512
+            "max_tokens": 4096
         }
 
         try:
@@ -234,8 +242,13 @@ class VisionAnalyzer:
             response.raise_for_status()
             
             data = response.json()
-            summary = data["choices"][0]["message"]["content"].strip()
+            message = data["choices"][0]["message"]
+            summary = message.get("content", "").strip()
+            reasoning = message.get("reasoning_content", "").strip()
             
+            if not summary and reasoning:
+                summary = f"[Thinking only, generation cut off]: {reasoning[:200]}..."
+                
             elapsed = time.time() - start_time
             print(f"Summary generated in {elapsed:.2f}s.")
             return summary
