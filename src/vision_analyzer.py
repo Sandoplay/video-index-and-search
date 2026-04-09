@@ -6,15 +6,15 @@ import requests
 import json
 import signal
 import sys
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from .models import FrameMetadata
 
 class VisionAnalyzer:
-    # Constants based on Qwen2.5-VL architecture and observation
-    CONTEXT_SIZE = 50536 # Reduced for faster embedding and to fit VRAM
-    TOKENS_PER_IMAGE = 1300  # Approx ~1280 + overhead
+    # Constants based on Qwen3.5-VL and user testing on RTX 5060 Ti
+    CONTEXT_SIZE = 72000 # Optimized for 16GB VRAM with Q8_0 quantization
+    TOKENS_PER_IMAGE = 1400  # Adjusted for Qwen3.5-VL typical usage
     TOKENS_PER_TEXT_CHAR = 0.3 # Rough estimate
-    RESERVE_TOKENS = 1500    # For system prompt, user text prompt, and generation output
+    RESERVE_TOKENS = 2000    # Increased for reasoning/thinking margin
 
     def __init__(self, model_id: str = "models/Qwen3.5-9B-Q8_0.gguf", load_in_4bit: bool = False):
         self.model_path = model_id
@@ -68,8 +68,14 @@ class VisionAnalyzer:
             "--n-gpu-layers", "-1",
             "--port", "8080",
             "--ctx-size", str(self.CONTEXT_SIZE),
-            "--n-predict", "1024",
-            "--parallel", "1"
+            "--n-predict", "10240",
+            "--parallel", "1",
+            "--reasoning-budget", "0",
+            "--threads", "8",             # Потоки для генерації тексту (краще дорівнює кількості фізичних ядер)
+            "--threads-batch", "16",      # Потоки для кодування зображень та промпту (всі логічні потоки)
+            # Навантаження на GPU (збільшуємо порції даних)
+            "--batch-size", "4096",       # Логічний розмір партії токенів (замість стандартних 2048)
+            "--ubatch-size", "1024"       # Фізичний мікро-батч для GPU (замість стандартних 512)
         ]
         
         # Windows-specific: Use CREATE_NEW_PROCESS_GROUP to allow sending signals safely
@@ -143,7 +149,7 @@ class VisionAnalyzer:
             
             print(f"Processing Batch {current_batch_index}/{total_batches} (Frames {i+1}-{i+len(batch)})...")
             
-            content = [
+            content: List[Any] = [
                 {"type": "text", "text": f"Audio context (may be auto-generated and contain noise/errors): {context_text}\n\nTask: Analyze these {len(batch)} video frames as a continuous sequence. Describe the events or actions shown. Use the audio context if it makes sense, but rely primarily on the visuals."}
             ]
             
@@ -162,7 +168,8 @@ class VisionAnalyzer:
                     }
                 ],
                 "temperature": 0.1,
-                "max_tokens": 2048
+                "max_tokens": 8192,
+                "chat_template_kwargs": {"enable_thinking": False}
             }
 
             start_time = time.time()
