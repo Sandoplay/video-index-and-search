@@ -71,12 +71,17 @@ class VisionAnalyzer:
             "--n-predict", "10240",
             "--parallel", "1",
             "--reasoning-budget", "0",
-            "--threads", "8",             # Потоки для генерації тексту (краще дорівнює кількості фізичних ядер)
-            "--threads-batch", "16",      # Потоки для кодування зображень та промпту (всі логічні потоки)
-            # Навантаження на GPU (збільшуємо порції даних)
-            "--batch-size", "4096",       # Логічний розмір партії токенів (замість стандартних 2048)
-            "--ubatch-size", "1024",      # Фізичний мікро-батч для GPU (замість стандартних 512)
-            "--no-cache-prompt"           # Вимикаємо кешування промптів (зображень), щоб уникнути витоку пам'яті між батчами
+            "--threads", "8",
+            "--threads-batch", "16",
+            "--batch-size", "4096",
+            "--ubatch-size", "1024",
+            "--no-cache-prompt",
+            "--cache-ram", "64",
+            "--cache-reuse", "0",
+            #"--no-mmap",                  # Вимикаємо mmap для більш стабільного споживання RAM
+            "--log-disable",               # Вимикаємо логи сервера для економії ресурсів
+            "--flash-attn", "on",
+            "--verbose"
         ]
         
         # Windows-specific: Use CREATE_NEW_PROCESS_GROUP to allow sending signals safely
