@@ -12,7 +12,7 @@ from .models import FrameMetadata
 class VisionAnalyzer:
     # Constants based on Qwen3.5-VL and user testing on RTX 5060 Ti
     CONTEXT_SIZE = 72000 # Optimized for 16GB VRAM with Q8_0 quantization
-    TOKENS_PER_IMAGE = 1400  # Adjusted for Qwen3.5-VL typical usage
+    TOKENS_PER_IMAGE = 1024  # Adjusted for Qwen3.5-VL typical usage
     TOKENS_PER_TEXT_CHAR = 0.3 # Rough estimate
     RESERVE_TOKENS = 2000    # Increased for reasoning/thinking margin
 
@@ -72,10 +72,10 @@ class VisionAnalyzer:
             "--n-predict", "10240",
             "--parallel", "1",
             "--reasoning-budget", "0",
-            "--threads", "8",
-            "--threads-batch", "16",
+            "--threads", "3",
+            "--threads-batch", "6",
             "--batch-size", "4096",
-            "--ubatch-size", "1024",
+            "--ubatch-size", "2048",
             "--no-cache-prompt",
             "--cache-ram", "64",
             "--cache-reuse", "0",
@@ -147,7 +147,7 @@ class VisionAnalyzer:
             
             # Clamp to reasonable limits (1 to 48)
             # 48 images fits within the 64k context with margin
-            batch_size = max(1, min(calc_batch, 48))
+            batch_size = max(1, min(calc_batch, 50))
             print(f">>> Auto-selected batch size: {batch_size} (based on {self.CONTEXT_SIZE} ctx)")
 
         total_frames = len(frames)

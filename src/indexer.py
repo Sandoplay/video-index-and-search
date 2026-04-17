@@ -110,10 +110,12 @@ class VideoIndexer:
             # But simple insert is fine for now, let's just insert.
             # To be safer about re-runs, we delete existing records for this video first.
             try:
-                self.table.delete(f"video_path = '{video_path}'")
+                # Екрануємо зворотні слеші та одинарні лапки для SQL-фільтра
+                safe_video_path = video_path.replace("\\", "\\\\").replace("'", "''")
+                self.table.delete(f"video_path = '{safe_video_path}'")
                 print(f"  -> Cleared old records for {video_path}")
-            except Exception:
-                pass # Table might be empty or filter failed
+            except Exception as e:
+                print(f"  -> Warning: Could not delete old records (might be empty): {e}")
                 
             print(f"  -> Inserting {len(records)} records into LanceDB...")
             self.table.add(records)

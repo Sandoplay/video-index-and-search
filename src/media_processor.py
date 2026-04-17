@@ -185,11 +185,48 @@ class MediaProcessor:
         cmd = [
             self.ffmpeg_bin, "-y",
             "-i", video_path,
-            "-vf", f"fps={target_raw_fps}",
-            "-q:v", "2",
+            "-vf", f"fps={target_raw_fps},scale=-2:768",
+            "-q:v", "3",
             output_pattern
         ]
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        # Спроба 1: Звичайний запуск
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        # Якщо сталася помилка (наприклад, Invalid color space)
+        if result.returncode != 0:
+            print(f"  -> Warning: Extraction failed. Attempting to fix metadata for {video_name}...")
+            
+            # Створюємо тимчасовий "вилікуваний" файл
+            temp_fixed = os.path.join(self.output_root, video_name, "temp_fixed.mp4")
+            
+            fix_cmd = [
+                self.ffmpeg_bin, "-y",
+                "-i", video_path,
+                "-c", "copy",
+                "-bsf:v", "h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1",
+                temp_fixed
+            ]
+            
+            # Лікуємо файл
+            fix_result = subprocess.run(fix_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            if fix_result.returncode == 0:
+                print("  -> File fixed! Retrying extraction...")
+                # Оновлюємо шлях до відео в команді на вилікуваний файл
+                cmd[cmd.index(video_path)] = temp_fixed
+                
+                # Спроба 2: Запуск з вилікуваним файлом
+                retry_result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                
+                if retry_result.returncode != 0:
+                     print(f"  -> Critical Error: Even fixed file failed to extract frames: {retry_result.stderr.decode('utf-8')}")
+                     
+                # Видаляємо тимчасовий файл, щоб не засмічувати диск
+                if os.path.exists(temp_fixed):
+                    os.remove(temp_fixed)
+            else:
+                print(f"  -> Critical Error: Failed to fix video metadata: {fix_result.stderr.decode('utf-8')}")
         
         # Collect
         collected_frames = []
