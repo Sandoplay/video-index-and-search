@@ -60,7 +60,7 @@ def process_batch(video_paths: List[str], args):
             model_path = "models/Qwen3.5-9B-Q8_0.gguf"
             
     try:
-        with VisionAnalyzer(model_id=model_path) as analyzer:
+        with VisionAnalyzer(model_id=model_path, verbose=args.verbose) as analyzer:
             for meta in videos_metadata:
                 print(f"Analyzing frames for: {os.path.basename(meta.video_path)}")
                 
@@ -122,6 +122,7 @@ def main():
     parser.add_argument("--interval", type=float, default=30.0, help="Deprecated (adaptive)")
     parser.add_argument("--max_frames", type=int, default=50, help="Target max frames per video (adaptive)")
     parser.add_argument("--batch_size", type=int, default=0, help="Number of frames to analyze at once (0 = auto)")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose output for vision analysis")
     
     args = parser.parse_args()
 

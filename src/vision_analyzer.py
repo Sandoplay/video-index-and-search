@@ -16,13 +16,14 @@ class VisionAnalyzer:
     TOKENS_PER_TEXT_CHAR = 0.3 # Rough estimate
     RESERVE_TOKENS = 2000    # Increased for reasoning/thinking margin
 
-    def __init__(self, model_id: str = "models/Qwen3.5-9B-Q8_0.gguf", load_in_4bit: bool = False):
+    def __init__(self, model_id: str = "models/Qwen3.5-9B-Q8_0.gguf", load_in_4bit: bool = False, verbose: bool = False):
         self.model_path = model_id
         self.mmproj_path = "models/mmproj-F16.gguf"
         self.server_process = None
         self.api_url = "http://127.0.0.1:8080/v1/chat/completions"
         self.torch_lib = os.path.join(os.getcwd(), ".venv", "Lib", "site-packages", "torch", "lib")
         self.is_external_server = False
+        self.verbose = verbose
 
     def __enter__(self):
         self._start_server()
@@ -78,12 +79,16 @@ class VisionAnalyzer:
             "--no-cache-prompt",
             "--cache-ram", "64",
             "--cache-reuse", "0",
-            #"--no-mmap",                  # Вимикаємо mmap для більш стабільного споживання RAM
-            "--log-disable",               # Вимикаємо логи сервера для економії ресурсів
-            "--flash-attn", "on",
-            "--verbose"
+            "--no-mmap",
+            "--flash-attn", "on"
         ]
-        
+
+        if self.verbose:
+            cmd.append("--verbose")
+            print("    [Verbose] Server logs enabled.")
+        else:
+            cmd.append("--log-disable")
+
         # Windows-specific: Use CREATE_NEW_PROCESS_GROUP to allow sending signals safely
         creationflags = 0
         if os.name == 'nt':
@@ -198,7 +203,13 @@ class VisionAnalyzer:
                 
                 print(f"  -> Processed {len(batch)} frames in {elapsed:.2f}s")
                 print(f"  -> Tokens: {prompt_tokens} prompt / {tokens} gen")
-                print(f"  -> Description: {description[:100]}...")
+                
+                if self.verbose:
+                    if reasoning:
+                        print(f"  -> Reasoning:\n{reasoning}\n")
+                    print(f"  -> Description:\n{description}\n")
+                else:
+                    print(f"  -> Description: {description[:100]}...")
                 
                 for frame in batch:
                     frame.description = description
@@ -264,6 +275,10 @@ class VisionAnalyzer:
                 
             elapsed = time.time() - start_time
             print(f"Summary generated in {elapsed:.2f}s.")
+            
+            if self.verbose:
+                print(f"\n--- Full Summary ---\n{summary}\n--------------------\n")
+                
             return summary
         except Exception as e:
             print(f"Error generating summary: {e}")
