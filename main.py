@@ -8,6 +8,7 @@ from src.media_processor import MediaProcessor
 from src.transcriber import AudioTranscriber
 from src.vision_analyzer import VisionAnalyzer
 from src.models import VideoMetadata
+from src.indexer import VideoIndexer
 
 def cleanup_gpu():
     """Aggressively clean up GPU memory (mostly for Whisper/Torch)."""
@@ -95,6 +96,21 @@ def process_batch(video_paths: List[str], args):
         with open(result_path, "w", encoding="utf-8") as f:
             json.dump(result_data, f, ensure_ascii=False, indent=4)
         print(f"Results for {video_name} saved to {result_path}")
+
+    # --- Stage 5: Vector Indexing ---
+    print(f"\n>>> STAGE 5: Vector Indexing")
+    try:
+        indexer = VideoIndexer()
+        for meta in videos_metadata:
+            result_path = os.path.join(meta.base_dir, "analysis_result.json")
+            if os.path.exists(result_path):
+                indexer.index_json(result_path)
+    except Exception as e:
+        print(f"Error during vector indexing: {e}")
+    finally:
+        if 'indexer' in locals():
+            del indexer
+        cleanup_gpu()
 
 def main():
     parser = argparse.ArgumentParser(description="Batch Multimodal Video Analysis System")

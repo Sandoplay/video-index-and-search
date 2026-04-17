@@ -75,7 +75,8 @@ class VisionAnalyzer:
             "--threads-batch", "16",      # Потоки для кодування зображень та промпту (всі логічні потоки)
             # Навантаження на GPU (збільшуємо порції даних)
             "--batch-size", "4096",       # Логічний розмір партії токенів (замість стандартних 2048)
-            "--ubatch-size", "1024"       # Фізичний мікро-батч для GPU (замість стандартних 512)
+            "--ubatch-size", "1024",      # Фізичний мікро-батч для GPU (замість стандартних 512)
+            "--no-cache-prompt"           # Вимикаємо кешування промптів (зображень), щоб уникнути витоку пам'яті між батчами
         ]
         
         # Windows-specific: Use CREATE_NEW_PROCESS_GROUP to allow sending signals safely
@@ -150,7 +151,7 @@ class VisionAnalyzer:
             print(f"Processing Batch {current_batch_index}/{total_batches} (Frames {i+1}-{i+len(batch)})...")
             
             content: List[Any] = [
-                {"type": "text", "text": f"Audio context (may be auto-generated and contain noise/errors): {context_text}\n\nTask: Analyze these {len(batch)} video frames as a continuous sequence. Describe the events or actions shown. Use the audio context if it makes sense, but rely primarily on the visuals."}
+                {"type": "text", "text": f"Audio context (may be auto-generated and contain noise/errors): {context_text}\n\nTask: Analyze these {len(batch)} video frames as a continuous sequence. Describe the events or actions shown. Use the audio context if it makes sense, but rely primarily on the visuals. If there is clearly readable text, include it in the summary."}
             ]
             
             for frame in batch:
