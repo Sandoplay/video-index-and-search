@@ -9,6 +9,7 @@ from src.transcriber import AudioTranscriber
 from src.vision_analyzer import VisionAnalyzer
 from src.models import VideoMetadata
 from src.indexer import VideoIndexer
+import concurrent.futures
 
 def cleanup_gpu():
     """Aggressively clean up GPU memory (mostly for Whisper/Torch)."""
@@ -54,22 +55,44 @@ def process_batch(video_paths: List[str], args):
         cleanup_gpu()
 
     # --- Stage 3: Vision Analysis (GGUF via llama-server) ---
-    print(f"\n>>> STAGE 3: Visual Analysis & Summarization")
+    print(f"\n>>> STAGE 3: Visual Analysis & Summarization (PARALLEL MODE)")
     model_path = args.vlm_model
     if not model_path.endswith(".gguf"):
-            model_path = "models/Qwen3.5-9B-Q8_0.gguf"
+        # model_path = "models/Qwen3.5-9B-Q8_0.gguf"
+        model_path = "models/Qwen3.5-9B-UD-Q4_K_XL.gguf"
             
+    # Допоміжна функція для обробки одного відео у потоці
+    def process_vision_task(meta, analyzer_instance):
+        try:
+            print(f"[{os.path.basename(meta.video_path)}] Analyzing frames...")
+            context_text = meta.transcription if meta.transcription else "No audio context available."
+            
+            # Аналіз кадрів
+            meta.frames = analyzer_instance.analyze_frames(meta.frames, context_text, batch_size=args.batch_size)
+            
+            print(f"[{os.path.basename(meta.video_path)}] Generating summary...")
+            # Генерація підсумку
+            meta.summary = analyzer_instance.generate_video_summary(meta.frames, context_text)
+            
+            # Примусове очищення слота для цього конкретного потоку (якщо використовуємо старий метод)
+            # Але з новим LLAMA_SET_ROWS=1 сервер сам краще керує пам'яттю слотів.
+            
+            print(f"[{os.path.basename(meta.video_path)}] DONE!")
+        except Exception as task_e:
+            print(f"[{os.path.basename(meta.video_path)}] Error during vision task: {task_e}")
+
     try:
-        with VisionAnalyzer(model_id=model_path, verbose=args.verbose) as analyzer:
-            for meta in videos_metadata:
-                print(f"Analyzing frames for: {os.path.basename(meta.video_path)}")
+        with VisionAnalyzer(model_id=model_path) as analyzer:
+            # Використовуємо ThreadPoolExecutor для паралельних запитів.
+            # max_workers має дорівнювати параметру --parallel у сервері!
+            max_parallel_requests = 4 
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel_requests) as executor:
+                # Запускаємо задачі для всіх відео
+                futures = [executor.submit(process_vision_task, meta, analyzer) for meta in videos_metadata]
                 
-                context_text = meta.transcription if meta.transcription else "No audio context available."
-                # batch_size=0 triggers auto-calculation
-                meta.frames = analyzer.analyze_frames(meta.frames, context_text, batch_size=args.batch_size)
-                
-                print(f"Generating summary for: {os.path.basename(meta.video_path)}")
-                meta.summary = analyzer.generate_video_summary(meta.frames, context_text)
+                # Чекаємо завершення всіх потоків
+                concurrent.futures.wait(futures)
 
     except Exception as e:
         print(f"Critical error during vision analysis: {e}")
@@ -116,7 +139,11 @@ def main():
     parser = argparse.ArgumentParser(description="Batch Multimodal Video Analysis System")
     parser.add_argument("--input", type=str, required=True, help="Path to video file or directory")
     parser.add_argument("--output_dir", type=str, default="data/processed", help="Root directory for processed data")
-    parser.add_argument("--vlm_model", type=str, default="models/Qwen3.5-9B-Q8_0.gguf", help="Path to GGUF model")
+
+    parser.add_argument("--vlm_model", type=str, default="models/Qwen3.5-9B-UD-Q4_K_XL.gguf", help="Path to GGUF model")
+    #parser.add_argument("--vlm_model", type=str, default="models/Qwen3.5-9B-Q8_0.gguf", help="Path to GGUF model")
+
+
     parser.add_argument("--whisper_model", type=str, default="large", help="Whisper model size")
     parser.add_argument("--threshold", type=float, default=0.1, help="Deprecated (adaptive)")
     parser.add_argument("--interval", type=float, default=30.0, help="Deprecated (adaptive)")

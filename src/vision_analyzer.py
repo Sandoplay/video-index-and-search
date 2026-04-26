@@ -11,7 +11,7 @@ from .models import FrameMetadata
 
 class VisionAnalyzer:
     # Constants based on Qwen3.5-VL and user testing on RTX 5060 Ti
-    CONTEXT_SIZE = 72000 # Optimized for 16GB VRAM with Q8_0 quantization
+    CONTEXT_SIZE = 64000 # Optimized for 16GB VRAM with Q8_0 quantization
     TOKENS_PER_IMAGE = 1024  # Adjusted for Qwen3.5-VL typical usage
     TOKENS_PER_TEXT_CHAR = 0.3 # Rough estimate
     RESERVE_TOKENS = 2000    # Increased for reasoning/thinking margin
@@ -61,6 +61,7 @@ class VisionAnalyzer:
         
         env = os.environ.copy()
         env["PATH"] = self.torch_lib + os.pathsep + env.get("PATH", "")
+        env["LLAMA_SET_ROWS"] = "1"
         
         cmd = [
             server_exe,
@@ -70,17 +71,18 @@ class VisionAnalyzer:
             "--port", "8080",
             "--ctx-size", str(self.CONTEXT_SIZE),
             "--n-predict", "10240",
-            "--parallel", "1",
             "--reasoning-budget", "0",
-            "--threads", "3",
-            "--threads-batch", "6",
+            "--threads", "8",
+            "--threads-batch", "8",
             "--batch-size", "4096",
             "--ubatch-size", "2048",
             "--no-cache-prompt",
-            "--cache-ram", "64",
+            "--cache-ram", "256",
             "--cache-reuse", "0",
             "--no-mmap",
-            "--flash-attn", "on"
+            "--flash-attn", "on",
+            "--parallel", "2"
+
         ]
 
         if self.verbose:

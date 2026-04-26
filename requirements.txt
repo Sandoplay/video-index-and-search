@@ -1,3 +1,5 @@
 torch
 openai-whisper
 requests
+lancedb
+sentence-transformers
