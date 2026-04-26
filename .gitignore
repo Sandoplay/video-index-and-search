@@ -6,3 +6,4 @@ llama-b8064-bin-win-cuda-13.1-x64.zip
 models/
 src/__pycache__/media_processor.cpython-313.pyc
 src/__pycache__/models.cpython-313.pyc
+experiments/
