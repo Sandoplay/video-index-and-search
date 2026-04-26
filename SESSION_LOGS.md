@@ -2,6 +2,31 @@
 
 Цей файл призначений для збереження контексту розробки між сесіями. Він допомагає швидко зрозуміти, на чому ми зупинилися, які проблеми вирішили та які наступні кроки запланували.
 
+When trying to read the file always consider that it is written in ukrainian. Use according file codings.
+
+---
+
+## Останні зміни (26 квітня 2026 р.)
+
+### 1. Оновлення Vision-Language моделі
+- **Модель:** Перейшли на **Qwen 3.5 9B Q4** у файлі `models/Qwen3.5-9B-UD-Q4_K_XL.gguf`.
+- **Конфігурація:** Актуальний шлях до моделі вказано в `main.py` як значення за замовчуванням для `--vlm_model`.
+
+### 2. Structured JSON Output для VLM
+- **Формат результатів:** Додано structured JSON-вивід із `summary` та `segments`, де сегменти мають `start_frame`, `end_frame`, `start_time`, `end_time` і `description`.
+- **Оптимізація:** `main.py` більше не викликає окремий summary-запит у стандартному pipeline; підсумок і timeline-сегменти генеруються одним VLM-запитом.
+- **JSON Schema:** Для structured-запитів у `src/vision_analyzer.py` додано `json_schema` в payload до `llama-server`, щоб constrained decoding стабілізував JSON-відповідь.
+- **Сумісність:** Старе поле `analysis` лишається в `analysis_result.json` як legacy-представлення, але `src/indexer.py` тепер надає перевагу `segments` і індексує їх як `type = "segment"`.
+- **Тести:** Додано `test_structured_analysis.py` для перевірки парсингу JSON, markdown-fenced JSON і clamp-логіки frame indices.
+
+### 3. Performance Timings
+- **Заміри часу:** У `main.py` додано wall-clock таймінги для media processing, transcription, VLM-аналізу кожного відео, загального Stage 3 та всього pipeline.
+- **JSON Output:** `analysis_result.json` тепер містить поле `timings`, зокрема `vlm_client_wall_seconds`, `vlm_server_total_seconds`, `vlm_server_prompt_seconds`, `vlm_server_generation_seconds`, `vlm_client_overhead_or_queue_seconds`, `stage3_total_wall_seconds`, `stage3_executor_workers` і `stage3_server_parallel_slots`.
+- **Уточнення метрик:** Per-video client wall time включає очікування HTTP/slot queue, а server timings беруться з `timings` у відповіді `llama-server` і краще відображають активну prompt/generation роботу моделі.
+- **Паралельність:** `max_parallel_requests` у `main.py` встановлено в `2`, щоб відповідати `llama-server --parallel 2` і не створювати зайву серверну чергу з боку клієнта.
+- **Планування VLM-задач:** Додано CLI-параметри `--parallel_requests` та `--server_parallel`; перед Stage 3 відео сортуються за `vlm_estimated_cost` від найважчих до найлегших.
+- **Cost Metrics:** У `timings` додаються `vlm_frames_total`, `vlm_frames_sent`, `vlm_frames_bytes`, `vlm_transcription_chars`, `vlm_estimated_cost` і `vlm_schedule_rank` для аналізу порядку запуску та benchmark `parallel 1 vs 2`.
+
 ---
 
 ## Останні зміни (9 квітня 2026 р.)

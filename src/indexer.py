@@ -29,7 +29,7 @@ class VideoRecord(LanceModel):
     video_path: str
     timestamp: float
     text: str
-    type: str # 'summary' or 'frame'
+    type: str # 'summary', 'segment', or 'frame'
     vector: Vector(VECTOR_DIM) # type: ignore
 
 class VideoIndexer:
@@ -87,23 +87,40 @@ class VideoIndexer:
                 "vector": self._generate_embedding(summary_text)
             })
             
-        # 2. Index the frame descriptions
-        analysis = data.get("analysis", [])
-        if analysis:
-            print(f"  -> Indexing {len(analysis)} frame descriptions...")
-            for i, frame in enumerate(analysis):
-                timestamp = frame.get("timestamp", 0.0)
-                desc = frame.get("description", "")
+        # 2. Prefer structured timeline segments; fall back to legacy frame descriptions.
+        segments = data.get("segments", [])
+        if segments:
+            print(f"  -> Indexing {len(segments)} timeline segments...")
+            for i, segment in enumerate(segments):
+                timestamp = segment.get("start_time", 0.0)
+                desc = segment.get("description", "")
                 if desc:
-                    frame_id = f"{video_path}_frame_{i}_{timestamp}"
+                    segment_id = f"{video_path}_segment_{i}_{timestamp}"
                     records.append({
-                        "id": frame_id,
+                        "id": segment_id,
                         "video_path": video_path,
                         "timestamp": float(timestamp),
                         "text": desc,
-                        "type": "frame",
+                        "type": "segment",
                         "vector": self._generate_embedding(desc)
                     })
+        else:
+            analysis = data.get("analysis", [])
+            if analysis:
+                print(f"  -> Indexing {len(analysis)} frame descriptions...")
+                for i, frame in enumerate(analysis):
+                    timestamp = frame.get("timestamp", 0.0)
+                    desc = frame.get("description", "")
+                    if desc:
+                        frame_id = f"{video_path}_frame_{i}_{timestamp}"
+                        records.append({
+                            "id": frame_id,
+                            "video_path": video_path,
+                            "timestamp": float(timestamp),
+                            "text": desc,
+                            "type": "frame",
+                            "vector": self._generate_embedding(desc)
+                        })
                     
         if records:
             # We can use merge_insert to handle duplicates (upsert based on id)
