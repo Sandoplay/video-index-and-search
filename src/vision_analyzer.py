@@ -15,6 +15,7 @@ class VisionAnalyzer:
     TOKENS_PER_IMAGE = 1024  # Adjusted for Qwen3.5-VL typical usage
     TOKENS_PER_TEXT_CHAR = 0.3 # Rough estimate
     RESERVE_TOKENS = 2000    # Increased for reasoning/thinking margin
+    MAX_STRUCTURED_SEGMENTS = 3
     STRUCTURED_ANALYSIS_SCHEMA: Dict[str, Any] = {
         "type": "object",
         "properties": {
@@ -23,6 +24,8 @@ class VisionAnalyzer:
             },
             "segments": {
                 "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_STRUCTURED_SEGMENTS,
                 "items": {
                     "type": "object",
                     "properties": {
@@ -193,6 +196,8 @@ class VisionAnalyzer:
             '    {"start_frame": 0, "end_frame": 0, "description": "string"}\n'
             "  ]\n"
             "}\n\n"
+            "Rules: use 1-3 segments total. For a typical video, use 3 broad segments: beginning, middle, and end."
+            "\n\n"
             f"Previous response:\n{raw_text}"
         )
 
@@ -288,7 +293,34 @@ class VisionAnalyzer:
                 ],
             )
 
-        return summary, segments
+        return summary, self._limit_structured_segments(segments)
+
+    def _limit_structured_segments(self, segments: List[SegmentMetadata]) -> List[SegmentMetadata]:
+        if len(segments) <= self.MAX_STRUCTURED_SEGMENTS:
+            return segments
+
+        ordered = sorted(segments, key=lambda segment: (segment.start_frame, segment.end_frame))
+        merged: List[SegmentMetadata] = []
+        total = len(ordered)
+
+        for bucket_index in range(self.MAX_STRUCTURED_SEGMENTS):
+            start = round(bucket_index * total / self.MAX_STRUCTURED_SEGMENTS)
+            end = round((bucket_index + 1) * total / self.MAX_STRUCTURED_SEGMENTS)
+            group = ordered[start:end]
+            if not group:
+                continue
+
+            merged.append(
+                SegmentMetadata(
+                    start_frame=group[0].start_frame,
+                    end_frame=group[-1].end_frame,
+                    start_time=group[0].start_time,
+                    end_time=group[-1].end_time,
+                    description=" ".join(segment.description for segment in group).strip(),
+                )
+            )
+
+        return merged
 
     def _response_timings(self, data: Dict[str, Any], client_wall_seconds: float) -> Dict[str, Any]:
         timings = data.get("timings") or {}
@@ -359,14 +391,17 @@ class VisionAnalyzer:
             f"{frame_lines}\n\n"
             "Task: Analyze the video as a continuous sequence and return a compact structured result.\n"
             "Group visually similar consecutive frames into meaningful timeline segments. Do not describe every frame independently unless every frame is genuinely distinct.\n"
-            "Use 4-12 segments for a typical video. Include clearly readable on-screen text inside the relevant segment description.\n\n"
+            "Use 1-3 segments total. For a typical video, use 3 broad segments: beginning, middle, and end.\n"
+            "Each segment should cover a meaningful consecutive part of the video, not an individual frame.\n"
+            "Include clearly readable on-screen text inside the relevant segment description.\n\n"
             "Return ONLY valid JSON. No markdown. No explanations. Use exactly this schema:\n"
             "{\n"
             '  "summary": "A concise paragraph summarizing the whole video.",\n'
             '  "segments": [\n'
             '    {"start_frame": 0, "end_frame": 0, "description": "What happens in this segment."}\n'
             "  ]\n"
-            "}"
+            "}\n"
+            "The segments array must contain no more than 3 items."
         )
 
         content: List[Any] = [{"type": "text", "text": instruction}]
