@@ -1,5 +1,6 @@
 torch
 openai-whisper
+faster-whisper
 requests
 lancedb
 sentence-transformers
