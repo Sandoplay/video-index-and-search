@@ -38,6 +38,15 @@ def estimate_vlm_cost(meta: VideoMetadata) -> int:
     meta.timings["vlm_estimated_cost"] = estimated_cost
     return estimated_cost
 
+def record_transcription_config(meta: VideoMetadata, config: dict):
+    meta.timings["transcription_config"] = config
+    meta.timings["transcription_backend"] = config.get("backend")
+    meta.timings["transcription_model"] = config.get("model")
+    meta.timings["transcription_beam_size"] = config.get("beam_size")
+    meta.timings["transcription_batched"] = config.get("batched")
+    meta.timings["transcription_batch_size"] = config.get("batch_size")
+    meta.timings["transcription_vad_filter"] = config.get("vad_filter")
+
 def process_batch(video_paths: List[str], args):
     pipeline_start = time.perf_counter()
     processor = MediaProcessor(output_root=args.output_dir)
@@ -65,8 +74,20 @@ def process_batch(video_paths: List[str], args):
     print(f"\n>>> STAGE 2: Audio Transcription")
     stage2_start = time.perf_counter()
     try:
-        transcriber = AudioTranscriber(model_size=args.whisper_model)
+        transcriber = AudioTranscriber(
+            model_size=args.whisper_model,
+            backend=args.whisper_backend,
+            beam_size=args.whisper_beam_size,
+            batch_size=args.whisper_batch_size,
+            batched=args.whisper_batched,
+            vad_filter=args.whisper_vad_filter,
+            device=args.whisper_device,
+            compute_type=args.whisper_compute_type,
+            cuda_dll_dir=args.cuda_dll_dir,
+        )
+        transcription_config = transcriber.config
         for meta in videos_metadata:
+            record_transcription_config(meta, transcription_config)
             if meta.audio_path:
                 transcription_start = time.perf_counter()
                 print(f"Transcribing audio for: {os.path.basename(meta.video_path)}")
@@ -218,6 +239,7 @@ def process_batch(video_paths: List[str], args):
             "video_path": meta.video_path,
             "duration": meta.duration,
             "transcription": meta.transcription,
+            "transcription_config": meta.timings.get("transcription_config", {}),
             "summary": meta.summary or "Summary generation failed.",
             "segments": segments_data,
             "analysis": legacy_analysis,
@@ -254,8 +276,15 @@ def main():
     parser.add_argument("--vlm_model", type=str, default="models/Qwen3.5-9B-UD-Q4_K_XL.gguf", help="Path to GGUF model")
     #parser.add_argument("--vlm_model", type=str, default="models/Qwen3.5-9B-Q8_0.gguf", help="Path to GGUF model")
 
-
-    parser.add_argument("--whisper_model", type=str, default="large", help="Whisper model size")
+    parser.add_argument("--whisper_backend", choices=["faster", "openai"], default="faster", help="Whisper backend")
+    parser.add_argument("--whisper_model", type=str, default="turbo", help="Whisper model size/name")
+    parser.add_argument("--whisper_beam_size", type=int, default=3, help="Whisper beam size")
+    parser.add_argument("--whisper_batch_size", type=int, default=16, help="faster-whisper batched pipeline batch size")
+    parser.add_argument("--whisper_batched", action=argparse.BooleanOptionalAction, default=True, help="Enable faster-whisper batched pipeline")
+    parser.add_argument("--whisper_vad_filter", action=argparse.BooleanOptionalAction, default=False, help="Enable faster-whisper VAD filter")
+    parser.add_argument("--whisper_compute_type", type=str, default="float16", help="faster-whisper compute type")
+    parser.add_argument("--whisper_device", type=str, default="cuda", help="faster-whisper device")
+    parser.add_argument("--cuda_dll_dir", type=str, default=os.path.join("bin", "llama-cpp"), help="Directory with CUDA DLLs for faster-whisper on Windows")
     parser.add_argument("--threshold", type=float, default=0.1, help="Deprecated (adaptive)")
     parser.add_argument("--interval", type=float, default=30.0, help="Deprecated (adaptive)")
     parser.add_argument("--max_frames", type=int, default=50, help="Target max frames per video (adaptive)")
