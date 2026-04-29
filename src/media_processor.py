@@ -97,64 +97,45 @@ class MediaProcessor:
         duration = self._get_video_duration(video_path)
         print(f"Video duration: {duration:.2f}s")
 
-        # --- Adaptive Logic ---
-        # 1. Determine a "min_interval" to prevent bursting.
-        #    For short videos (<30s), allow frames every 0.5s.
-        #    For long videos (>2m), allow frames every 2.0s.
-        if duration < 60:
-            min_interval = 0.5
-        elif duration < 300:
-            min_interval = 2.0
-        else:
-            min_interval = 5.0
-
-        # 2. FFmpeg Filter
-        # select='gt(scene,0.15)' -> Select frames with >15% change
-        # OR 'not(mod(n,K))' -> Force a frame every K frames (fallback)
-        # But simply using scene + min_interval is safer.
-        # We will extract slightly MORE than needed, then downsample in Python.
-        
-        # Filter: "Select if Scene Change > 15% AND time since last selected > min_interval"
-        # Note: FFmpeg's select filter state is tricky. 
-        # Easier approach: Use a relatively sensitive scene threshold, but output vsync to keep timestamps.
-        
-        # We will use a standard sensitive scene detection, then filter by count.
         output_pattern = os.path.join(frames_dir, "frame_%04d.jpg")
-        
-        # Scene threshold 0.15 is a good balance for "significant motion".
-        # We also force a frame every 'force_interval' seconds to catch static slides.
-        force_interval = max(duration / (max_frames * 1.5), 5.0) # Ensure we have at least candidates
-        force_fps = 1 / force_interval
-        
-        select_filter = f"gt(scene,0.15)"
-        
-        cmd = [
-            self.ffmpeg_bin, "-y",
-            "-i", video_path,
-            "-vf", f"select='{select_filter}',vsync=vfr", # Variable frame rate
-            "-q:v", "2", # High quality JPEG
-            output_pattern
-        ]
-        
-        # If video is extremely static, the scene filter might return 0 frames.
-        # We handle this by checking result count.
-        
-        print(f"Running adaptive frame extraction...")
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        # 3. Collect extracted frames
-        frames = []
-        for file in sorted(os.listdir(frames_dir)):
-            if file.endswith(".jpg"):
-                # We need timestamps. FFmpeg doesn't write timestamp to filename easily without complex configuration.
-                # However, with vsync=vfr, it's hard to guess.
-                # Alternative: Use ffprobe to read timestamps of extracted JPEGs? No, JPEGs don't hold video timestamps.
-                # BETTER: Enable debug output in ffmpeg to capture timestamps? Complicated.
-                
-                # RETRY with timestamp in filename using frame properties?
-                # Actually, simpler method for "Adaptivity" with timestamps:
-                # Use standard FPS sampling but HIGH fps, then scene detect in Python? Too slow.
-                pass
+
+        # --- Deprecated scene-filter attempt kept for reference ---
+        # This path extracted scene-change frames and then the current robust
+        # fps-based path below deleted `frames_dir`, so the work was discarded.
+        # It is intentionally disabled, not removed, because the notes are useful
+        # if we later revisit hybrid/quality-filtered sampling.
+        #
+        # if duration < 60:
+        #     min_interval = 0.5
+        # elif duration < 300:
+        #     min_interval = 2.0
+        # else:
+        #     min_interval = 5.0
+        #
+        # # select='gt(scene,0.15)' -> select frames with >15% change.
+        # # This had timestamp issues with vsync=vfr and over-selected flash frames.
+        # force_interval = max(duration / (max_frames * 1.5), 5.0)
+        # force_fps = 1 / force_interval
+        # select_filter = "gt(scene,0.15)"
+        #
+        # cmd = [
+        #     self.ffmpeg_bin, "-y",
+        #     "-i", video_path,
+        #     "-vf", f"select='{select_filter}',vsync=vfr",
+        #     "-q:v", "2",
+        #     output_pattern
+        # ]
+        #
+        # print("Running adaptive frame extraction...")
+        # subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        #
+        # frames = []
+        # for file in sorted(os.listdir(frames_dir)):
+        #     if file.endswith(".jpg"):
+        #         # JPEG output from vsync=vfr does not preserve usable video
+        #         # timestamps in the filename, so mapping back to timeline was
+        #         # unreliable without extra showinfo parsing.
+        #         pass
 
         # Since getting exact timestamps from `vsync=vfr` output filenames is hard (frame_001 doesn't tell us time),
         # We will switch to a robust "fps" filter strategy which is deterministic, 
@@ -177,7 +158,7 @@ class MediaProcessor:
         
         print(f"Targeting raw extraction at ~{target_raw_fps:.2f} fps based on duration.")
         
-        # Re-run extraction with fps filter (reliable timestamps via math)
+        # Run extraction with fps filter (reliable timestamps via math)
         # filename frame_0001.jpg -> timestamp ~ 1/fps * (i-1)
         shutil.rmtree(frames_dir)
         os.makedirs(frames_dir, exist_ok=True)

@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Video Semantic Search</title>
+  <script>
+    (() => {
+      const saved = localStorage.getItem("video-search-theme");
+      const theme = saved === "dark" || saved === "light"
+        ? saved
+        : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
+  <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}">
+</head>
+<body>
+  <main class="shell">
+    <section class="search-band">
+      <div class="topbar">
+        <div class="heading">
+          <p class="eyebrow">Local index</p>
+          <h1>Video Semantic Search</h1>
+        </div>
+
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Switch to dark theme" aria-pressed="false">
+          <span class="theme-label">Dark</span>
+        </button>
+      </div>
+
+      {% if startup_error %}
+        <div class="alert">
+          Search service failed to start: {{ startup_error }}
+        </div>
+      {% endif %}
+
+      <form id="search-form" class="search-form">
+        <label class="search-label" for="query">Search query</label>
+        <div class="search-row">
+          <input id="query" name="q" type="search" autocomplete="off" placeholder="neck tension, dark tactical gear, salary negotiation..." autofocus>
+          <button type="submit">Search</button>
+        </div>
+
+        <div class="controls-row">
+          <fieldset class="segmented" aria-label="Search type">
+            <label>
+              <input type="radio" name="type" value="summary" checked>
+              <span>Videos</span>
+            </label>
+            <label>
+              <input type="radio" name="type" value="all">
+              <span>Videos + moments</span>
+            </label>
+            <label>
+              <input type="radio" name="type" value="segment">
+              <span>Moments</span>
+            </label>
+          </fieldset>
+
+          <label class="limit-control">
+            <span>Limit</span>
+            <input id="limit" name="limit" type="number" min="1" max="100" value="10">
+          </label>
+        </div>
+      </form>
+    </section>
+
+    <section class="results-band">
+      <div id="status" class="status">Enter a query to search indexed videos.</div>
+      <div id="results" class="results"></div>
+    </section>
+  </main>
+
+  <script>
+    const form = document.querySelector("#search-form");
+    const queryInput = document.querySelector("#query");
+    const limitInput = document.querySelector("#limit");
+    const statusEl = document.querySelector("#status");
+    const resultsEl = document.querySelector("#results");
+    const themeToggle = document.querySelector("#theme-toggle");
+    const themeLabel = themeToggle.querySelector(".theme-label");
+
+    function preferredTheme() {
+      const saved = localStorage.getItem("video-search-theme");
+      if (saved === "dark" || saved === "light") {
+        return saved;
+      }
+      return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }
+
+    function applyTheme(theme) {
+      document.documentElement.dataset.theme = theme;
+      localStorage.setItem("video-search-theme", theme);
+      const isDark = theme === "dark";
+      themeToggle.setAttribute("aria-pressed", String(isDark));
+      themeToggle.setAttribute("aria-label", isDark ? "Switch to light theme" : "Switch to dark theme");
+      themeLabel.textContent = isDark ? "Light" : "Dark";
+    }
+
+    function selectedType() {
+      return document.querySelector("input[name='type']:checked").value;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function highlightQuery(value, query) {
+      let html = escapeHtml(value);
+      const terms = Array.from(new Set(
+        query
+          .toLowerCase()
+          .match(/[\p{L}\p{N}_'-]+/gu) || []
+      ))
+        .filter((term) => term.length >= 2)
+        .sort((a, b) => b.length - a.length);
+
+      for (const term of terms) {
+        const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const pattern = new RegExp(`(${escapedTerm})`, "giu");
+        html = html.replace(pattern, "<mark>$1</mark>");
+      }
+
+      return html;
+    }
+
+    function mediaUrl(path) {
+      return `/media?path=${encodeURIComponent(path || "")}`;
+    }
+
+    function videoUrl(item) {
+      const baseUrl = mediaUrl(item.video_path);
+      if ((item.type === "segment" || item.type === "frame") && Number.isFinite(Number(item.timestamp))) {
+        return `${baseUrl}#t=${Math.max(0, Number(item.timestamp)).toFixed(3)}`;
+      }
+      return baseUrl;
+    }
+
+    function renderResult(item, query) {
+      const hasTimestamp = item.timestamp_label && (item.type === "segment" || item.type === "frame");
+      const preview = item.preview_url
+        ? `<img class="preview" src="${escapeHtml(item.preview_url)}" alt="">`
+        : `<div class="preview placeholder">No preview</div>`;
+      const timestamp = hasTimestamp
+        ? `<span class="timestamp">${escapeHtml(item.timestamp_label)}</span>`
+        : "";
+
+      return `
+        <article class="result-card">
+          ${preview}
+          <div class="result-body">
+            <div class="result-topline">
+              <span class="badge">${escapeHtml(item.type)}</span>
+              ${timestamp}
+              <span class="distance">${Number(item.distance).toFixed(4)}</span>
+            </div>
+            <h2>${escapeHtml(item.video_name || item.video_path)}</h2>
+            <p class="path">${escapeHtml(item.video_path)}</p>
+            <p class="text">${highlightQuery(item.text, query)}</p>
+            <div class="result-actions">
+              <button class="action-button play-video" type="button" data-video-url="${escapeHtml(videoUrl(item))}">
+                Play
+              </button>
+              <a class="action-button action-link" href="${escapeHtml(videoUrl(item))}" target="_blank" rel="noreferrer">
+                Open in new tab
+              </a>
+              <button class="action-button copy-path" type="button" data-path="${escapeHtml(item.video_abs_path || item.video_path)}">
+                Copy path
+              </button>
+              <button class="action-button reveal-file" type="button" data-path="${escapeHtml(item.video_path)}">
+                Show in folder
+              </button>
+            </div>
+            <div class="video-panel" hidden></div>
+          </div>
+        </article>
+      `;
+    }
+
+    async function revealFile(path) {
+      const response = await fetch(`/api/reveal-file?path=${encodeURIComponent(path)}`, { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.detail || "Could not open file location.");
+      }
+    }
+
+    async function copyText(value) {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(value);
+        return;
+      }
+
+      const textArea = document.createElement("textarea");
+      textArea.value = value;
+      textArea.setAttribute("readonly", "");
+      textArea.style.position = "fixed";
+      textArea.style.left = "-9999px";
+      document.body.append(textArea);
+      textArea.select();
+      document.execCommand("copy");
+      textArea.remove();
+    }
+
+    function wait(ms) {
+      return new Promise((resolve) => window.setTimeout(resolve, ms));
+    }
+
+    function flashButton(button, label, duration = 1200, restoreLabel = button.textContent) {
+      button.disabled = true;
+      button.textContent = label;
+      window.setTimeout(() => {
+        button.textContent = restoreLabel;
+        button.disabled = false;
+      }, duration);
+    }
+
+    function toggleVideo(button) {
+      const card = button.closest(".result-card");
+      const panel = card.querySelector(".video-panel");
+      const isOpen = !panel.hidden;
+
+      if (isOpen) {
+        panel.hidden = true;
+        panel.innerHTML = "";
+        button.textContent = "Play";
+        return;
+      }
+
+      panel.innerHTML = `
+        <video class="inline-video" controls preload="metadata" src="${escapeHtml(button.dataset.videoUrl)}"></video>
+      `;
+      panel.hidden = false;
+      button.textContent = "Hide video";
+      panel.querySelector("video").focus();
+    }
+
+    async function runSearch(event) {
+      event.preventDefault();
+      const query = queryInput.value.trim();
+      resultsEl.innerHTML = "";
+
+      if (!query) {
+        statusEl.textContent = "Enter a query to search indexed videos.";
+        return;
+      }
+
+      const params = new URLSearchParams({
+        q: query,
+        type: selectedType(),
+        limit: limitInput.value || "10",
+      });
+
+      statusEl.textContent = "Searching...";
+      try {
+        const response = await fetch(`/api/search?${params.toString()}`);
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.detail || "Search failed.");
+        }
+
+        if (!payload.results.length) {
+          statusEl.textContent = "No matching results found.";
+          return;
+        }
+
+        statusEl.textContent = `${payload.results.length} result${payload.results.length === 1 ? "" : "s"}`;
+        resultsEl.innerHTML = payload.results.map((item) => renderResult(item, query)).join("");
+      } catch (error) {
+        statusEl.textContent = error.message;
+      }
+    }
+
+    form.addEventListener("submit", runSearch);
+    resultsEl.addEventListener("click", async (event) => {
+      const playButton = event.target.closest(".play-video");
+      if (playButton) {
+        toggleVideo(playButton);
+        return;
+      }
+
+      const revealButton = event.target.closest(".reveal-file");
+      if (revealButton) {
+        revealButton.disabled = true;
+        revealButton.textContent = "Opening...";
+        try {
+          await revealFile(revealButton.dataset.path);
+          await wait(550);
+          flashButton(revealButton, "Shown", 1200, "Show in folder");
+        } catch (error) {
+          revealButton.disabled = false;
+          revealButton.textContent = "Show in folder";
+          statusEl.textContent = error.message;
+        }
+        return;
+      }
+
+      const copyButton = event.target.closest(".copy-path");
+      if (copyButton) {
+        copyButton.disabled = true;
+        try {
+          await copyText(copyButton.dataset.path);
+          flashButton(copyButton, "Copied");
+        } catch (error) {
+          copyButton.disabled = false;
+          copyButton.textContent = "Copy path";
+          statusEl.textContent = "Could not copy path.";
+        }
+      }
+    });
+
+    themeToggle.addEventListener("click", () => {
+      const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+      applyTheme(current === "dark" ? "light" : "dark");
+    });
+
+    document.querySelectorAll("input[name='type']").forEach((input) => {
+      input.addEventListener("change", () => {
+        if (queryInput.value.trim()) {
+          form.requestSubmit();
+        }
+      });
+    });
+
+    applyTheme(preferredTheme());
+  </script>
+</body>
+</html>

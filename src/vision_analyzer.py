@@ -16,6 +16,8 @@ class VisionAnalyzer:
     TOKENS_PER_TEXT_CHAR = 0.3 # Rough estimate
     RESERVE_TOKENS = 2000    # Increased for reasoning/thinking margin
     MAX_STRUCTURED_SEGMENTS = 3
+    STRUCTURED_MAX_FRAMES = 50
+    STRUCTURED_HTTP_RETRY_FRAMES = 32
     STRUCTURED_ANALYSIS_SCHEMA: Dict[str, Any] = {
         "type": "object",
         "properties": {
@@ -161,6 +163,28 @@ class VisionAnalyzer:
     def _image_to_base64(self, image_path: str) -> str:
         with open(image_path, "rb") as img_file:
             return base64.b64encode(img_file.read()).decode('utf-8')
+
+    def _raise_for_status_with_body(self, response: requests.Response, context: str) -> None:
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            body = response.text.strip()
+            if len(body) > 1000:
+                body = body[:1000] + "..."
+            if body:
+                print(f"  -> {context} HTTP {response.status_code} response body: {body}")
+            raise exc
+
+    def _select_evenly_spaced_frames(self, frames: List[FrameMetadata], max_frames: int) -> List[FrameMetadata]:
+        if len(frames) <= max_frames:
+            return frames
+
+        if max_frames <= 1:
+            return [frames[0]]
+
+        step = (len(frames) - 1) / (max_frames - 1)
+        indices = [round(i * step) for i in range(max_frames)]
+        return [frames[index] for index in indices]
 
     def _extract_json_candidate(self, text: str) -> str:
         """Extract a JSON object from plain text or a markdown code fence."""
@@ -352,33 +376,7 @@ class VisionAnalyzer:
 
         return result
 
-    def analyze_video_structured(self, frames: List[FrameMetadata], transcription: str, batch_size: int = 0) -> Tuple[str, List[SegmentMetadata], Dict[str, Any]]:
-        """
-        Analyze sampled video frames and return one structured summary plus timeline segments.
-        The standard path sends all sampled frames in a single request.
-        """
-        if not self._is_server_ready():
-            self._start_server()
-
-        if not frames:
-            return "No video content analyzed.", [], {"vlm_client_wall_seconds": 0.0}
-
-        max_context_chars = 3000
-        context_text = transcription[:max_context_chars] + "..." if len(transcription) > max_context_chars else transcription
-
-        if batch_size <= 0:
-            text_tokens = len(context_text) * self.TOKENS_PER_TEXT_CHAR
-            available_tokens = self.CONTEXT_SIZE - self.RESERVE_TOKENS - text_tokens
-            calc_batch = int(available_tokens / self.TOKENS_PER_IMAGE)
-            batch_size = max(1, min(calc_batch, 50))
-            print(f">>> Auto-selected structured batch size: {batch_size} (based on {self.CONTEXT_SIZE} ctx)")
-
-        if len(frames) > 50:
-            print(f">>> Warning: {len(frames)} frames exceed structured limit 50; using the first 50 frames.")
-            frames_for_request = frames[:50]
-        else:
-            frames_for_request = frames
-
+    def _build_structured_payload(self, frames_for_request: List[FrameMetadata], context_text: str) -> Dict[str, Any]:
         frame_lines = "\n".join(
             f"- Frame {i}: {frame.timestamp:.2f}s"
             for i, frame in enumerate(frames_for_request)
@@ -413,7 +411,7 @@ class VisionAnalyzer:
                 "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}
             })
 
-        payload = {
+        return {
             "messages": [
                 {
                     "role": "user",
@@ -426,13 +424,57 @@ class VisionAnalyzer:
             "chat_template_kwargs": {"enable_thinking": False}
         }
 
+    def analyze_video_structured(self, frames: List[FrameMetadata], transcription: str, batch_size: int = 0) -> Tuple[str, List[SegmentMetadata], Dict[str, Any]]:
+        """
+        Analyze sampled video frames and return one structured summary plus timeline segments.
+        The standard path sends all sampled frames in a single request.
+        """
+        if not self._is_server_ready():
+            self._start_server()
+
+        if not frames:
+            return "No video content analyzed.", [], {"vlm_client_wall_seconds": 0.0}
+
+        max_context_chars = 3000
+        context_text = transcription[:max_context_chars] + "..." if len(transcription) > max_context_chars else transcription
+
+        if batch_size <= 0:
+            text_tokens = len(context_text) * self.TOKENS_PER_TEXT_CHAR
+            available_tokens = self.CONTEXT_SIZE - self.RESERVE_TOKENS - text_tokens
+            calc_batch = int(available_tokens / self.TOKENS_PER_IMAGE)
+            batch_size = max(1, min(calc_batch, self.STRUCTURED_MAX_FRAMES))
+            print(f">>> Auto-selected structured batch size: {batch_size} (based on {self.CONTEXT_SIZE} ctx)")
+
+        if len(frames) > self.STRUCTURED_MAX_FRAMES:
+            print(
+                f">>> Warning: {len(frames)} frames exceed structured limit {self.STRUCTURED_MAX_FRAMES}; "
+                f"using {self.STRUCTURED_MAX_FRAMES} evenly sampled frames."
+            )
+        frames_for_request = self._select_evenly_spaced_frames(frames, self.STRUCTURED_MAX_FRAMES)
+        payload = self._build_structured_payload(frames_for_request, context_text)
+
         print(f"\n>>> Analyzing {len(frames_for_request)} frames with structured JSON output...")
         start_time = time.time()
         raw_response = ""
 
         try:
             response = requests.post(self.api_url, json=payload, timeout=240)
-            response.raise_for_status()
+            try:
+                self._raise_for_status_with_body(response, "Structured analysis")
+            except requests.HTTPError:
+                if response.status_code == 400 and len(frames_for_request) > self.STRUCTURED_HTTP_RETRY_FRAMES:
+                    retry_frames = self._select_evenly_spaced_frames(frames_for_request, self.STRUCTURED_HTTP_RETRY_FRAMES)
+                    print(
+                        f"  -> Structured request rejected with 400. Retrying once with "
+                        f"{len(retry_frames)} evenly sampled frames..."
+                    )
+                    frames_for_request = retry_frames
+                    payload = self._build_structured_payload(frames_for_request, context_text)
+                    start_time = time.time()
+                    response = requests.post(self.api_url, json=payload, timeout=240)
+                    self._raise_for_status_with_body(response, "Structured analysis retry")
+                else:
+                    raise
             data = response.json()
             client_wall_seconds = time.time() - start_time
 

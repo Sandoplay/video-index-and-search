@@ -127,8 +127,9 @@ class VideoIndexer:
             # But simple insert is fine for now, let's just insert.
             # To be safer about re-runs, we delete existing records for this video first.
             try:
-                # Екрануємо зворотні слеші та одинарні лапки для SQL-фільтра
-                safe_video_path = video_path.replace("\\", "\\\\").replace("'", "''")
+                # LanceDB SQL filters match Windows backslashes literally.
+                # Escaping them as "\\" prevents old rows from being deleted.
+                safe_video_path = video_path.replace("'", "''")
                 self.table.delete(f"video_path = '{safe_video_path}'")
                 print(f"  -> Cleared old records for {video_path}")
             except Exception as e:
