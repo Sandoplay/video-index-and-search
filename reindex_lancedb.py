@@ -36,6 +36,7 @@ def main() -> None:
     parser.add_argument("--add-batch-size", type=int, default=512, help="Number of records to insert into LanceDB per add call")
     parser.add_argument("--embedding-ctx-size", type=int, default=None, help="llama-server context size for embedding indexing")
     parser.add_argument("--embedding-parallel", type=int, default=2, help="llama-server --parallel slots for embedding indexing")
+    parser.add_argument("--recreate-table", action="store_true", help="Drop and recreate the target LanceDB table before indexing")
     args = parser.parse_args()
 
     json_files = list(iter_selected_files(args))
@@ -49,6 +50,7 @@ def main() -> None:
         table_name=args.table,
         embedding_context_size=args.embedding_ctx_size,
         embedding_parallel=args.embedding_parallel,
+        recreate_table=args.recreate_table,
     )
     try:
         indexer.index_json_files(

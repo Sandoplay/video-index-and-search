@@ -50,6 +50,7 @@ class VideoIndexer:
         table_name: str | None = None,
         embedding_context_size: int | None = None,
         embedding_parallel: int | None = None,
+        recreate_table: bool = False,
     ):
         self.db_path = str(db_path)
         self.model_name = model_name
@@ -73,7 +74,11 @@ class VideoIndexer:
         # Open or create the table
         tables = self.db.list_tables()
         table_names = tables.tables if hasattr(tables, "tables") else tables
-        if self.table_name in table_names:
+        if recreate_table and self.table_name in table_names:
+            print(f"Recreating LanceDB table: {self.table_name}")
+            self.db.drop_table(self.table_name)
+            self.table = self.db.create_table(self.table_name, schema=self.schema)
+        elif self.table_name in table_names:
             self.table = self.db.open_table(self.table_name)
         else:
             self.table = self.db.create_table(self.table_name, schema=self.schema)
