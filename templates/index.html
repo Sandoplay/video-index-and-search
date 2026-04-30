@@ -150,6 +150,7 @@
       const timestamp = hasTimestamp
         ? `<span class="timestamp">${escapeHtml(item.timestamp_label)}</span>`
         : "";
+      const score = Number(item.distance).toFixed(4);
 
       return `
         <article class="result-card">
@@ -158,7 +159,7 @@
             <div class="result-topline">
               <span class="badge">${escapeHtml(item.type)}</span>
               ${timestamp}
-              <span class="distance">${Number(item.distance).toFixed(4)}</span>
+              <span class="distance">${escapeHtml(score)}</span>
             </div>
             <h2>${escapeHtml(item.video_name || item.video_path)}</h2>
             <p class="path">${escapeHtml(item.video_path)}</p>

@@ -6,13 +6,17 @@ from urllib.parse import quote
 
 import lancedb
 
-os.environ["HF_HUB_OFFLINE"] = "1"
-from sentence_transformers import SentenceTransformer
+from src.embedding_provider import (
+    DB_PATH,
+    MINILM_MODEL_NAME,
+    MINILM_TABLE_NAME,
+    MODEL_CACHE_DIR,
+    create_embedding_provider,
+    default_table_name_for_backend,
+)
 
-DB_PATH = Path("data/lancedb")
-MODEL_CACHE_DIR = Path("models/.cache/huggingface")
-MODEL_NAME = "all-MiniLM-L6-v2"
-TABLE_NAME = "video_metadata"
+MODEL_NAME = MINILM_MODEL_NAME
+TABLE_NAME = MINILM_TABLE_NAME
 
 
 def format_timestamp(seconds: float) -> str:
@@ -132,28 +136,40 @@ class SearchService:
         db_path: str | Path = DB_PATH,
         model_name: str = MODEL_NAME,
         cache_dir: str | Path = MODEL_CACHE_DIR,
-        table_name: str = TABLE_NAME,
+        table_name: str | None = None,
+        embedding_backend: str | None = None,
     ):
         self.db_path = Path(db_path)
         self.model_name = model_name
         self.cache_dir = Path(cache_dir)
-        self.table_name = table_name
+        self.table_name = (
+            table_name
+            or os.getenv("EMBEDDING_TABLE_NAME")
+            or default_table_name_for_backend(embedding_backend)
+        )
 
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found at {self.db_path}. Run the indexer first.")
-
-        print(f"Loading embedding model once: {self.model_name}...")
-        self.model = SentenceTransformer(self.model_name, cache_folder=str(self.cache_dir))
 
         print(f"Connecting to LanceDB at: {self.db_path}")
         self.db = lancedb.connect(str(self.db_path))
         if self.table_name not in _table_names(self.db):
             raise RuntimeError(f"Table '{self.table_name}' not found in {self.db_path}. Run the indexer first.")
 
+        self.provider = create_embedding_provider(
+            backend=embedding_backend,
+            model_name=self.model_name,
+            cache_dir=self.cache_dir,
+        )
         self.table = self.db.open_table(self.table_name)
         self.library = AnalysisLibrary()
 
-    def search(self, query: str, item_type: str = "summary", limit: int = 10) -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        item_type: str = "summary",
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
         query = query.strip()
         if not query:
             return []
@@ -163,7 +179,7 @@ class SearchService:
 
         limit = max(1, min(int(limit), 100))
         candidate_limit = min(max(limit * 8, limit), 500)
-        query_vector = self.model.encode(query).tolist()
+        query_vector = self.provider.embed_query(query)
         search = self.table.search(query_vector).limit(candidate_limit)
 
         if item_type in {"summary", "segment"}:
@@ -222,3 +238,6 @@ class SearchService:
             "duration": None,
             "summary": "",
         }
+
+    def close(self) -> None:
+        self.provider.close()

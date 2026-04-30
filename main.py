@@ -253,7 +253,12 @@ def process_batch(video_paths: List[str], args):
     # --- Stage 5: Vector Indexing ---
     print(f"\n>>> STAGE 5: Vector Indexing")
     try:
-        indexer = VideoIndexer()
+        indexer = VideoIndexer(
+            embedding_backend=args.embedding_backend,
+            table_name=args.embedding_table,
+            embedding_context_size=args.embedding_ctx_size,
+            embedding_parallel=args.embedding_parallel,
+        )
         for meta in videos_metadata:
             result_path = os.path.join(meta.base_dir, "analysis_result.json")
             if os.path.exists(result_path):
@@ -262,6 +267,7 @@ def process_batch(video_paths: List[str], args):
         print(f"Error during vector indexing: {e}")
     finally:
         if 'indexer' in locals():
+            indexer.close()
             del indexer
         cleanup_gpu()
 
@@ -291,6 +297,10 @@ def main():
     parser.add_argument("--batch_size", type=int, default=0, help="Number of frames to analyze at once (0 = auto)")
     parser.add_argument("--parallel_requests", type=int, default=2, help="Client-side VLM request concurrency")
     parser.add_argument("--server_parallel", type=int, default=2, help="llama-server --parallel slots")
+    parser.add_argument("--embedding_backend", choices=["minilm", "qwen3-gguf", "qwen3-4b-gguf"], default=None, help="Embedding backend for Stage 5 indexing")
+    parser.add_argument("--embedding_table", default=None, help="Override LanceDB table for Stage 5 indexing")
+    parser.add_argument("--embedding_ctx_size", type=int, default=None, help="llama-server context size for Stage 5 embedding indexing")
+    parser.add_argument("--embedding_parallel", type=int, default=2, help="llama-server --parallel slots for Stage 5 embedding indexing")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output for vision analysis")
     
     args = parser.parse_args()

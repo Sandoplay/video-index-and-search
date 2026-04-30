@@ -43,6 +43,13 @@ def load_search_service() -> None:
         print(f"Search service failed to start: {exc}")
 
 
+@app.on_event("shutdown")
+def close_search_service() -> None:
+    service = getattr(app.state, "search_service", None)
+    if service is not None:
+        service.close()
+
+
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
