@@ -4,3 +4,6 @@ faster-whisper
 requests
 lancedb
 sentence-transformers
+fastapi
+uvicorn
+jinja2
