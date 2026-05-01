@@ -177,16 +177,18 @@ class SearchService:
         if not query:
             return []
 
-        if item_type not in {"summary", "all", "segment"}:
-            raise ValueError("item_type must be one of: summary, all, segment")
+        if item_type not in {"summary", "all", "segment", "transcription"}:
+            raise ValueError("item_type must be one of: summary, all, segment, transcription")
 
         limit = max(1, min(int(limit), 100))
         candidate_limit = min(max(limit * 8, 200), 500)
         query_vector = self.provider.embed_query(query)
         search = self.table.search(query_vector).limit(candidate_limit)
 
-        if item_type in {"summary", "segment"}:
+        if item_type in {"summary", "segment", "transcription"}:
             search = search.where(f"type = '{item_type}'")
+        elif item_type == "all":
+            search = search.where("type != 'transcription'")
 
         rows = search.to_list()
         if lexical_rerank:
@@ -242,7 +244,7 @@ class SearchService:
         item_type = str(row.get("type") or "")
         video_path = _normalize_path_key(str(row.get("video_path") or ""))
 
-        if item_type == "summary":
+        if item_type in {"summary", "transcription"}:
             return (item_type, video_path)
 
         timestamp = round(float(row.get("timestamp") or 0.0), 3)

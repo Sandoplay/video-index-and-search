@@ -64,7 +64,7 @@ def home(request: Request) -> HTMLResponse:
 @app.get("/api/search")
 def api_search(
     q: str = Query("", max_length=500),
-    type: Literal["summary", "all", "segment"] = "summary",
+    type: Literal["summary", "all", "segment", "transcription"] = "summary",
     limit: int = Query(10, ge=1),
     lexical_rerank: bool = Query(False),
 ) -> dict:

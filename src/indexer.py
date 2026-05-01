@@ -24,7 +24,7 @@ class VideoRecord(LanceModel):
     video_path: str
     timestamp: float
     text: str
-    type: str # 'summary', 'segment', or 'frame'
+    type: str # 'summary', 'transcription', 'segment', or 'frame'
     vector: Vector(VECTOR_DIM) # type: ignore
 
 
@@ -120,6 +120,17 @@ class VideoIndexer:
                 "timestamp": 0.0,
                 "text": summary_text,
                 "type": "summary",
+            })
+
+        transcription_text = str(data.get("transcription") or "").strip()
+        if transcription_text:
+            transcription_id = f"{video_path}_transcription"
+            records.append({
+                "id": transcription_id,
+                "video_path": video_path,
+                "timestamp": 0.0,
+                "text": transcription_text,
+                "type": "transcription",
             })
 
         segments = data.get("segments", [])

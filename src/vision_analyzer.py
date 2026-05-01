@@ -213,7 +213,8 @@ class VisionAnalyzer:
 
     def _context_retry_frame_count(self, response: requests.Response, current_frame_count: int) -> int:
         data = self._response_json_body(response)
-        error = data.get("error") if isinstance(data.get("error"), dict) else {}
+        raw_error = data.get("error")
+        error: Dict[str, Any] = raw_error if isinstance(raw_error, dict) else {}
 
         prompt_tokens = error.get("n_prompt_tokens")
         context_size = error.get("n_ctx")

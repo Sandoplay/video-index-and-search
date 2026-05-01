@@ -39,7 +39,7 @@ def main() -> None:
     parser.add_argument("--cases", default="data/search_eval_queries.json", help="JSON file with query/expected_video cases")
     parser.add_argument("--embedding-backend", choices=["minilm", "qwen3-gguf", "qwen3-4b-gguf"], default=None)
     parser.add_argument("--table", default=None, help="Override LanceDB table name")
-    parser.add_argument("--type", choices=["summary", "all", "segment"], default="all", help="Search type")
+    parser.add_argument("--type", choices=["summary", "all", "segment", "transcription"], default="all", help="Search type")
     parser.add_argument("--limit", type=int, default=10, help="Search depth to inspect")
     args = parser.parse_args()
 
