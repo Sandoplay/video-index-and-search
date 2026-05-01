@@ -6,11 +6,14 @@ from src.indexer import VideoIndexer
 
 
 def find_analysis_files(data_root: Path) -> List[Path]:
-    if data_root.name.startswith("processed"):
-        roots = [data_root] if data_root.is_dir() else []
-    else:
-        roots = [path for path in data_root.glob("processed*") if path.is_dir()]
+    if not data_root.is_dir():
+        return []
 
+    direct_files = sorted(data_root.rglob("analysis_result.json"))
+    if direct_files:
+        return direct_files
+
+    roots = [path for path in data_root.glob("processed*") if path.is_dir()]
     files: List[Path] = []
     for root in roots:
         files.extend(root.rglob("analysis_result.json"))

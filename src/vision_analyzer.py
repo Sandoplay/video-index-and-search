@@ -6,13 +6,17 @@ import requests
 import json
 import signal
 import sys
+import threading
+import math
 from typing import List, Optional, Dict, Any, Tuple
 from .models import FrameMetadata, SegmentMetadata
 
 class VisionAnalyzer:
     # Constants based on Qwen3.5-VL and user testing on RTX 5060 Ti
     CONTEXT_SIZE = 64000 # Optimized for 16GB VRAM with Q8_0 quantization
-    TOKENS_PER_IMAGE = 1024  # Adjusted for Qwen3.5-VL typical usage
+    # Used only as a rough fallback for legacy batched frame analysis.
+    # Structured analysis uses server-reported token counts on HTTP 400 instead of pre-tokenizing.
+    TOKENS_PER_IMAGE = 1058
     TOKENS_PER_TEXT_CHAR = 0.3 # Rough estimate
     RESERVE_TOKENS = 2000    # Increased for reasoning/thinking margin
     MAX_STRUCTURED_SEGMENTS = 3
@@ -61,9 +65,15 @@ class VisionAnalyzer:
         self.is_external_server = False
         self.verbose = verbose
         self.parallel_slots = parallel_slots
+        self._server_lock = threading.RLock()
+        self._shutdown_requested = False
 
     def __enter__(self):
-        self._start_server()
+        try:
+            self._start_server()
+        except BaseException:
+            self._stop_server()
+            raise
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -80,85 +90,104 @@ class VisionAnalyzer:
             return False
 
     def _start_server(self):
-        if self._is_server_ready():
-            print(">>> Connected to an existing and READY llama-server.")
-            self.is_external_server = True
-            return
+        with self._server_lock:
+            if self._shutdown_requested:
+                raise RuntimeError("llama-server start was requested after shutdown.")
 
-        actual_model_path = os.path.abspath(self.model_path)
-        actual_mmproj_path = os.path.abspath(self.mmproj_path)
-        
-        if not os.path.exists(actual_mmproj_path):
-             actual_mmproj_path = os.path.abspath(os.path.join("models", os.path.basename(self.mmproj_path)))
-        
-        server_exe = os.path.abspath(os.path.join("bin", "llama-cpp", "llama-server.exe"))
-        
-        print(f">>> Starting llama-server with VISION support...")
-        print(f"    Context size set to {self.CONTEXT_SIZE} for max throughput.")
-        
-        env = os.environ.copy()
-        env["PATH"] = self.torch_lib + os.pathsep + env.get("PATH", "")
-        env["LLAMA_SET_ROWS"] = "1"
-        
-        cmd = [
-            server_exe,
-            "--model", actual_model_path,
-            "--mmproj", actual_mmproj_path,
-            "--n-gpu-layers", "-1",
-            "--port", "8080",
-            "--ctx-size", str(self.CONTEXT_SIZE),
-            "--n-predict", "10240",
-            "--reasoning-budget", "0",
-            "--threads", "8",
-            "--threads-batch", "8",
-            "--batch-size", "4096",
-            "--ubatch-size", "2048",
-            "--no-cache-prompt",
-            "--cache-ram", "256",
-            "--cache-reuse", "0",
-            "--no-mmap",
-            "--flash-attn", "on",
-            "--parallel", str(self.parallel_slots)
+            if self._is_server_ready():
+                if self.server_process is None:
+                    print(">>> Connected to an existing and READY llama-server.")
+                    self.is_external_server = True
+                else:
+                    print(">>> llama-server is already READY.")
+                return
 
-        ]
+            if self.server_process is not None and self.server_process.poll() is None:
+                print(">>> llama-server process already exists; waiting for it to become ready...")
+                self._wait_for_server_ready()
+                return
 
-        if self.verbose:
-            cmd.append("--verbose")
-            print("    [Verbose] Server logs enabled.")
-        else:
-            cmd.append("--log-disable")
+            actual_model_path = os.path.abspath(self.model_path)
+            actual_mmproj_path = os.path.abspath(self.mmproj_path)
+            
+            if not os.path.exists(actual_mmproj_path):
+                 actual_mmproj_path = os.path.abspath(os.path.join("models", os.path.basename(self.mmproj_path)))
+            
+            server_exe = os.path.abspath(os.path.join("bin", "llama-cpp", "llama-server.exe"))
+            
+            print(f">>> Starting llama-server with VISION support...")
+            print(f"    Context size set to {self.CONTEXT_SIZE} for max throughput.")
+            
+            env = os.environ.copy()
+            env["PATH"] = self.torch_lib + os.pathsep + env.get("PATH", "")
+            env["LLAMA_SET_ROWS"] = "1"
+            
+            cmd = [
+                server_exe,
+                "--model", actual_model_path,
+                "--mmproj", actual_mmproj_path,
+                "--n-gpu-layers", "-1",
+                "--port", "8080",
+                "--ctx-size", str(self.CONTEXT_SIZE),
+                "--n-predict", "10240",
+                "--reasoning-budget", "0",
+                "--threads", "8",
+                "--threads-batch", "8",
+                "--batch-size", "4096",
+                "--ubatch-size", "2048",
+                "--no-cache-prompt",
+                "--cache-ram", "256",
+                "--cache-reuse", "0",
+                "--no-mmap",
+                "--flash-attn", "on",
+                "--parallel", str(self.parallel_slots)
 
-        # Windows-specific: Use CREATE_NEW_PROCESS_GROUP to allow sending signals safely
-        creationflags = 0
-        if os.name == 'nt':
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+            ]
 
-        self.server_process = subprocess.Popen(cmd, env=env, creationflags=creationflags)
-        
-        print(">>> Waiting for model and vision encoder to load...")
+            if self.verbose:
+                cmd.append("--verbose")
+                print("    [Verbose] Server logs enabled.")
+            else:
+                cmd.append("--log-disable")
+
+            # Windows-specific: Use CREATE_NEW_PROCESS_GROUP to allow sending signals safely
+            creationflags = 0
+            if os.name == 'nt':
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+
+            self._shutdown_requested = False
+            self.is_external_server = False
+            self.server_process = subprocess.Popen(cmd, env=env, creationflags=creationflags)
+            
+            print(">>> Waiting for model and vision encoder to load...")
+            self._wait_for_server_ready()
+
+    def _wait_for_server_ready(self):
         max_retries = 60
         for i in range(max_retries):
             if self._is_server_ready():
                 print(">>> Server ready!")
                 time.sleep(2)
                 return
-            if self.server_process.poll() is not None:
+            if self.server_process is not None and self.server_process.poll() is not None:
                 raise RuntimeError(f"llama-server exited with code {self.server_process.returncode}")
             time.sleep(1)
         
         raise RuntimeError("Failed to start llama-server within timeout.")
 
     def _stop_server(self):
-        if self.server_process and not self.is_external_server:
-            print(">>> Stopping llama-server...")
-            # Simple and effective termination for both Windows and Linux
-            self.server_process.terminate()
-            try:
-                self.server_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                print(">>> Force killing llama-server...")
-                self.server_process.kill()
-            self.server_process = None
+        with self._server_lock:
+            self._shutdown_requested = True
+            if self.server_process and not self.is_external_server:
+                print(">>> Stopping llama-server...")
+                # Simple and effective termination for both Windows and Linux
+                self.server_process.terminate()
+                try:
+                    self.server_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    print(">>> Force killing llama-server...")
+                    self.server_process.kill()
+                self.server_process = None
 
     def _image_to_base64(self, image_path: str) -> str:
         with open(image_path, "rb") as img_file:
@@ -174,6 +203,29 @@ class VisionAnalyzer:
             if body:
                 print(f"  -> {context} HTTP {response.status_code} response body: {body}")
             raise exc
+
+    def _response_json_body(self, response: requests.Response) -> Dict[str, Any]:
+        try:
+            data = response.json()
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _context_retry_frame_count(self, response: requests.Response, current_frame_count: int) -> int:
+        data = self._response_json_body(response)
+        error = data.get("error") if isinstance(data.get("error"), dict) else {}
+
+        prompt_tokens = error.get("n_prompt_tokens")
+        context_size = error.get("n_ctx")
+        if isinstance(prompt_tokens, (int, float)) and isinstance(context_size, (int, float)) and prompt_tokens > 0 and context_size > 0:
+            reserve_tokens = min(self.RESERVE_TOKENS, max(512, int(context_size * 0.08)))
+            target_tokens = max(1, context_size - reserve_tokens)
+            scaled_count = math.floor(current_frame_count * (target_tokens / prompt_tokens))
+            return max(1, min(current_frame_count - 1, scaled_count))
+
+        if current_frame_count > self.STRUCTURED_HTTP_RETRY_FRAMES:
+            return self.STRUCTURED_HTTP_RETRY_FRAMES
+        return max(1, current_frame_count // 2)
 
     def _select_evenly_spaced_frames(self, frames: List[FrameMetadata], max_frames: int) -> List[FrameMetadata]:
         if len(frames) <= max_frames:
@@ -439,42 +491,49 @@ class VisionAnalyzer:
         context_text = transcription[:max_context_chars] + "..." if len(transcription) > max_context_chars else transcription
 
         if batch_size <= 0:
-            text_tokens = len(context_text) * self.TOKENS_PER_TEXT_CHAR
-            available_tokens = self.CONTEXT_SIZE - self.RESERVE_TOKENS - text_tokens
-            calc_batch = int(available_tokens / self.TOKENS_PER_IMAGE)
-            batch_size = max(1, min(calc_batch, self.STRUCTURED_MAX_FRAMES))
-            print(f">>> Auto-selected structured batch size: {batch_size} (based on {self.CONTEXT_SIZE} ctx)")
-
-        if len(frames) > self.STRUCTURED_MAX_FRAMES:
+            batch_size = self.STRUCTURED_MAX_FRAMES
             print(
-                f">>> Warning: {len(frames)} frames exceed structured limit {self.STRUCTURED_MAX_FRAMES}; "
-                f"using {self.STRUCTURED_MAX_FRAMES} evenly sampled frames."
+                f">>> Structured analysis will try up to {batch_size} frames first; "
+                "if llama-server reports context overflow, it will retry with fewer frames."
             )
-        frames_for_request = self._select_evenly_spaced_frames(frames, self.STRUCTURED_MAX_FRAMES)
-        payload = self._build_structured_payload(frames_for_request, context_text)
 
-        print(f"\n>>> Analyzing {len(frames_for_request)} frames with structured JSON output...")
+        initial_frame_limit = min(batch_size, self.STRUCTURED_MAX_FRAMES)
+
+        if len(frames) > initial_frame_limit:
+            print(
+                f">>> Warning: {len(frames)} frames exceed structured request limit {initial_frame_limit}; "
+                f"using {initial_frame_limit} evenly sampled frames."
+            )
+        frames_for_request = self._select_evenly_spaced_frames(frames, initial_frame_limit)
+
         start_time = time.time()
         raw_response = ""
 
         try:
-            response = requests.post(self.api_url, json=payload, timeout=240)
-            try:
-                self._raise_for_status_with_body(response, "Structured analysis")
-            except requests.HTTPError:
-                if response.status_code == 400 and len(frames_for_request) > self.STRUCTURED_HTTP_RETRY_FRAMES:
-                    retry_frames = self._select_evenly_spaced_frames(frames_for_request, self.STRUCTURED_HTTP_RETRY_FRAMES)
+            attempted_frame_counts = set()
+            while True:
+                attempted_frame_counts.add(len(frames_for_request))
+                payload = self._build_structured_payload(frames_for_request, context_text)
+                print(f"\n>>> Analyzing {len(frames_for_request)} frames with structured JSON output...")
+                start_time = time.time()
+                response = requests.post(self.api_url, json=payload, timeout=240)
+                try:
+                    self._raise_for_status_with_body(response, "Structured analysis")
+                    break
+                except requests.HTTPError:
+                    if response.status_code != 400 or len(frames_for_request) <= 1:
+                        raise
+
+                    retry_frame_count = self._context_retry_frame_count(response, len(frames_for_request))
+                    if retry_frame_count >= len(frames_for_request) or retry_frame_count in attempted_frame_counts:
+                        raise
+
                     print(
-                        f"  -> Structured request rejected with 400. Retrying once with "
-                        f"{len(retry_frames)} evenly sampled frames..."
+                        f"  -> Structured request rejected with 400. Retrying with "
+                        f"{retry_frame_count} evenly sampled frames..."
                     )
-                    frames_for_request = retry_frames
-                    payload = self._build_structured_payload(frames_for_request, context_text)
-                    start_time = time.time()
-                    response = requests.post(self.api_url, json=payload, timeout=240)
-                    self._raise_for_status_with_body(response, "Structured analysis retry")
-                else:
-                    raise
+                    frames_for_request = self._select_evenly_spaced_frames(frames, retry_frame_count)
+
             data = response.json()
             client_wall_seconds = time.time() - start_time
 

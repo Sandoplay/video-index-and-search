@@ -62,6 +62,16 @@
             <span>Limit</span>
             <input id="limit" name="limit" type="number" min="1" max="100" value="10">
           </label>
+
+          <label class="highlight-control">
+            <input id="substring-highlight" type="checkbox">
+            <span>Substring highlight</span>
+          </label>
+
+          <label class="highlight-control">
+            <input id="lexical-rerank" type="checkbox">
+            <span>Lexical rerank</span>
+          </label>
         </div>
       </form>
     </section>
@@ -80,6 +90,8 @@
     const resultsEl = document.querySelector("#results");
     const themeToggle = document.querySelector("#theme-toggle");
     const themeLabel = themeToggle.querySelector(".theme-label");
+    const substringHighlightInput = document.querySelector("#substring-highlight");
+    const lexicalRerankInput = document.querySelector("#lexical-rerank");
 
     function preferredTheme() {
       const saved = localStorage.getItem("video-search-theme");
@@ -123,7 +135,9 @@
 
       for (const term of terms) {
         const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const pattern = new RegExp(`(${escapedTerm})`, "giu");
+        const pattern = substringHighlightInput.checked
+          ? new RegExp(`(${escapedTerm})`, "giu")
+          : new RegExp(`(?<![\\p{L}\\p{N}_'-])(${escapedTerm})(?![\\p{L}\\p{N}_'-])`, "giu");
         html = html.replace(pattern, "<mark>$1</mark>");
       }
 
@@ -256,6 +270,7 @@
         q: query,
         type: selectedType(),
         limit: limitInput.value || "10",
+        lexical_rerank: lexicalRerankInput.checked ? "true" : "false",
       });
 
       statusEl.textContent = "Searching...";
@@ -327,6 +342,18 @@
           form.requestSubmit();
         }
       });
+    });
+
+    substringHighlightInput.addEventListener("change", () => {
+      if (queryInput.value.trim()) {
+        form.requestSubmit();
+      }
+    });
+
+    lexicalRerankInput.addEventListener("change", () => {
+      if (queryInput.value.trim()) {
+        form.requestSubmit();
+      }
     });
 
     applyTheme(preferredTheme());

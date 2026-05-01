@@ -66,6 +66,7 @@ def api_search(
     q: str = Query("", max_length=500),
     type: Literal["summary", "all", "segment"] = "summary",
     limit: int = Query(10, ge=1),
+    lexical_rerank: bool = Query(False),
 ) -> dict:
     query = q.strip()
     if not query:
@@ -77,12 +78,12 @@ def api_search(
         raise HTTPException(status_code=503, detail=detail)
 
     try:
-        results = service.search(query, item_type=type, limit=limit)
+        results = service.search(query, item_type=type, limit=limit, lexical_rerank=lexical_rerank)
     except Exception as exc:
         print(f"Search failed: {exc}")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return {"query": query, "type": type, "limit": limit, "results": results}
+    return {"query": query, "type": type, "limit": limit, "lexical_rerank": lexical_rerank, "results": results}
 
 
 @app.get("/media")

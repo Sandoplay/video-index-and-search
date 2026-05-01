@@ -250,6 +250,23 @@ button:disabled {
   font-weight: 700;
 }
 
+.highlight-control {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.highlight-control input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
 .results-band {
   padding-top: 22px;
 }

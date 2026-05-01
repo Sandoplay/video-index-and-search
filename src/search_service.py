@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -17,6 +18,7 @@ from src.embedding_provider import (
 
 MODEL_NAME = MINILM_MODEL_NAME
 TABLE_NAME = MINILM_TABLE_NAME
+WORD_PATTERN = re.compile(r"[\w'-]+", re.UNICODE)
 
 
 def format_timestamp(seconds: float) -> str:
@@ -41,6 +43,11 @@ def _absolute_path(path_value: str) -> str:
     return str(path.resolve())
 
 
+def _search_terms(value: str) -> List[str]:
+    terms = WORD_PATTERN.findall(value.lower())
+    return [term for term in terms if len(term) >= 2]
+
+
 class AnalysisLibrary:
     def __init__(self, data_root: str | Path = "data"):
         self.data_root = Path(data_root)
@@ -53,32 +60,27 @@ class AnalysisLibrary:
             self.by_video_path = {}
             return
 
-        roots = [
-            path for path in self.data_root.glob("processed*")
-            if path.is_dir()
-        ]
-        for root in roots:
-            for json_path in root.rglob("analysis_result.json"):
-                try:
-                    with json_path.open("r", encoding="utf-8") as handle:
-                        data = json.load(handle)
-                except (OSError, json.JSONDecodeError):
-                    continue
+        for json_path in self.data_root.rglob("analysis_result.json"):
+            try:
+                with json_path.open("r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except (OSError, json.JSONDecodeError):
+                continue
 
-                video_path = str(data.get("video_path") or "")
-                if not video_path:
-                    continue
+            video_path = str(data.get("video_path") or "")
+            if not video_path:
+                continue
 
-                entry = {
-                    "json_path": str(json_path),
-                    "json_mtime": json_path.stat().st_mtime,
-                    "data": data,
-                }
+            entry = {
+                "json_path": str(json_path),
+                "json_mtime": json_path.stat().st_mtime,
+                "data": data,
+            }
 
-                for key in {video_path, _normalize_path_key(video_path)}:
-                    existing = candidates.get(key)
-                    if existing is None or entry["json_mtime"] > existing["json_mtime"]:
-                        candidates[key] = entry
+            for key in {video_path, _normalize_path_key(video_path)}:
+                existing = candidates.get(key)
+                if existing is None or entry["json_mtime"] > existing["json_mtime"]:
+                    candidates[key] = entry
 
         self.by_video_path = candidates
 
@@ -169,6 +171,7 @@ class SearchService:
         query: str,
         item_type: str = "summary",
         limit: int = 10,
+        lexical_rerank: bool = False,
     ) -> List[Dict[str, Any]]:
         query = query.strip()
         if not query:
@@ -178,18 +181,46 @@ class SearchService:
             raise ValueError("item_type must be one of: summary, all, segment")
 
         limit = max(1, min(int(limit), 100))
-        candidate_limit = min(max(limit * 8, limit), 500)
+        candidate_limit = min(max(limit * 8, 200), 500)
         query_vector = self.provider.embed_query(query)
         search = self.table.search(query_vector).limit(candidate_limit)
 
         if item_type in {"summary", "segment"}:
             search = search.where(f"type = '{item_type}'")
 
-        deduped_rows = self._dedupe_rows(search.to_list(), limit)
+        rows = search.to_list()
+        if lexical_rerank:
+            rows = self._rerank_rows(rows, query)
+
+        deduped_rows = self._dedupe_rows(rows, limit)
         return [
             self.library.enrich(self._normalize_result(index, row))
             for index, row in enumerate(deduped_rows, 1)
         ]
+
+    def _rerank_rows(self, rows: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+        query_terms = _search_terms(query)
+        if not query_terms:
+            return rows
+
+        unique_query_terms = list(dict.fromkeys(query_terms))
+        query_phrase = " ".join(unique_query_terms)
+
+        def score(row: Dict[str, Any]) -> tuple[float, float]:
+            distance = float(row.get("_distance") or 0.0)
+            text_terms = set(_search_terms(str(row.get("text") or "")))
+            if not text_terms:
+                return (distance, distance)
+
+            matched = sum(1 for term in unique_query_terms if term in text_terms)
+            coverage = matched / len(unique_query_terms)
+            phrase_bonus = 1.0 if query_phrase and query_phrase in str(row.get("text") or "").lower() else 0.0
+
+            lexical_bonus = 0.18 * matched + 0.08 * coverage + 0.04 * phrase_bonus
+            adjusted_distance = distance - lexical_bonus
+            return (adjusted_distance, distance)
+
+        return sorted(rows, key=score)
 
     def _dedupe_rows(self, rows: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
