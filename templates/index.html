@@ -13,7 +13,7 @@
       document.documentElement.dataset.theme = theme;
     })();
   </script>
-  <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}?v=20260507b">
 </head>
 <body>
   <main class="shell">
@@ -29,17 +29,19 @@
         </button>
       </div>
 
-      {% if startup_error %}
-        <div class="alert">
-          Search service failed to start: {{ startup_error }}
+      {% if not service_status.ready %}
+        <div id="service-banner" class="alert {% if service_status.status == 'starting' %}info{% endif %}">
+          {{ service_status.message }}
         </div>
+      {% else %}
+        <div id="service-banner" class="alert info" hidden></div>
       {% endif %}
 
       <form id="search-form" class="search-form">
         <label class="search-label" for="query">Search query</label>
         <div class="search-row">
           <input id="query" name="q" type="search" autocomplete="off" placeholder="neck tension, dark tactical gear, salary negotiation..." autofocus>
-          <button type="submit">Search</button>
+          <button type="submit" {% if not service_status.ready %}disabled{% endif %}>Search</button>
         </div>
 
         <div class="controls-row">
@@ -64,7 +66,21 @@
 
           <label class="limit-control">
             <span>Limit</span>
-            <input id="limit" name="limit" type="number" min="1" max="100" value="10">
+            <div class="number-input">
+              <input id="limit" name="limit" type="number" min="1" max="100" value="10">
+              <div class="number-stepper" aria-hidden="true">
+                <button class="stepper-button" type="button" data-step="up" tabindex="-1" aria-label="Increase limit">
+                  <svg viewBox="0 0 12 12" focusable="false" aria-hidden="true">
+                    <path d="M2.2 7.6 6 3.8l3.8 3.8" />
+                  </svg>
+                </button>
+                <button class="stepper-button" type="button" data-step="down" tabindex="-1" aria-label="Decrease limit">
+                  <svg viewBox="0 0 12 12" focusable="false" aria-hidden="true">
+                    <path d="M2.2 4.4 6 8.2l3.8-3.8" />
+                  </svg>
+                </button>
+              </div>
+            </div>
           </label>
 
           <label class="highlight-control">
@@ -81,7 +97,13 @@
     </section>
 
     <section class="results-band">
-      <div id="status" class="status">Enter a query to search indexed videos.</div>
+      <div id="status" class="status">
+        {% if service_status.ready %}
+          Enter a query to search indexed videos.
+        {% else %}
+          {{ service_status.message }}
+        {% endif %}
+      </div>
       <div id="results" class="results"></div>
     </section>
   </main>
@@ -92,10 +114,13 @@
     const limitInput = document.querySelector("#limit");
     const statusEl = document.querySelector("#status");
     const resultsEl = document.querySelector("#results");
+    const serviceBanner = document.querySelector("#service-banner");
+    const searchButton = form.querySelector("button[type='submit']");
     const themeToggle = document.querySelector("#theme-toggle");
     const themeLabel = themeToggle.querySelector(".theme-label");
     const substringHighlightInput = document.querySelector("#substring-highlight");
     const lexicalRerankInput = document.querySelector("#lexical-rerank");
+    const limitStepperButtons = document.querySelectorAll(".stepper-button");
 
     function preferredTheme() {
       const saved = localStorage.getItem("video-search-theme");
@@ -297,6 +322,40 @@
       }
     }
 
+    async function refreshServiceStatus() {
+      try {
+        const response = await fetch("/api/service-status", { cache: "no-store" });
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = await response.json();
+        const ready = Boolean(payload.ready);
+        searchButton.disabled = !ready;
+
+        if (ready) {
+          serviceBanner.hidden = true;
+          serviceBanner.textContent = "";
+          serviceBanner.className = "alert info";
+          if (!queryInput.value.trim() && !resultsEl.children.length) {
+            statusEl.textContent = "Enter a query to search indexed videos.";
+          }
+          return;
+        }
+
+        serviceBanner.hidden = false;
+        serviceBanner.textContent = payload.message || "Search service is not available.";
+        serviceBanner.className = payload.status === "starting" ? "alert info" : "alert";
+        if (!queryInput.value.trim() && !resultsEl.children.length) {
+          statusEl.textContent = serviceBanner.textContent;
+        }
+      } catch (error) {
+        serviceBanner.hidden = false;
+        serviceBanner.textContent = "Search service status is unavailable.";
+        serviceBanner.className = "alert";
+      }
+    }
+
     form.addEventListener("submit", runSearch);
     resultsEl.addEventListener("click", async (event) => {
       const playButton = event.target.closest(".play-video");
@@ -360,7 +419,28 @@
       }
     });
 
+    limitInput.addEventListener("change", () => {
+      if (queryInput.value.trim()) {
+        form.requestSubmit();
+      }
+    });
+
+    limitStepperButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        if (button.dataset.step === "up") {
+          limitInput.stepUp();
+        } else {
+          limitInput.stepDown();
+        }
+        limitInput.dispatchEvent(new Event("input", { bubbles: true }));
+        limitInput.dispatchEvent(new Event("change", { bubbles: true }));
+        limitInput.focus();
+      });
+    });
+
     applyTheme(preferredTheme());
+    window.setInterval(refreshServiceStatus, 1000);
+    refreshServiceStatus();
   </script>
 </body>
 </html>

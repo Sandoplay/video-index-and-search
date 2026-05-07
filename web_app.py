@@ -1,6 +1,8 @@
 import subprocess
+import threading
+import time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -15,6 +17,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 app = FastAPI(title="Video Semantic Search")
 templates = Jinja2Templates(directory=str(PROJECT_ROOT / "templates"))
 app.mount("/static", StaticFiles(directory=str(PROJECT_ROOT / "static")), name="static")
+SEARCH_STARTING_MESSAGE = "Search service is starting. Loading the embedding backend can take a while."
+SEARCH_READY_MESSAGE = "Search service is ready."
 
 
 def resolve_project_file(path: str) -> Path:
@@ -33,14 +37,40 @@ def resolve_project_file(path: str) -> Path:
 
 
 @app.on_event("startup")
-def load_search_service() -> None:
+def start_search_service_loader() -> None:
+    app.state.search_service = None
+    app.state.search_startup_error = ""
+    app.state.search_status = "starting"
+    app.state.search_status_message = SEARCH_STARTING_MESSAGE
+    app.state.search_started_at = time.time()
+    app.state.search_ready_at = None
+    app.state.search_lock = threading.Lock()
+
+    thread = threading.Thread(target=load_search_service_in_background, daemon=True)
+    app.state.search_loader_thread = thread
+    thread.start()
+
+
+def load_search_service_in_background() -> None:
     try:
-        app.state.search_service = SearchService()
-        app.state.search_startup_error = ""
+        print(SEARCH_STARTING_MESSAGE, flush=True)
+        service = SearchService()
+        with app.state.search_lock:
+            app.state.search_service = service
+            app.state.search_startup_error = ""
+            app.state.search_status = "ready"
+            app.state.search_status_message = SEARCH_READY_MESSAGE
+            app.state.search_ready_at = time.time()
+        print(SEARCH_READY_MESSAGE, flush=True)
     except Exception as exc:
-        app.state.search_service = None
-        app.state.search_startup_error = str(exc)
-        print(f"Search service failed to start: {exc}")
+        message = f"Search service failed to start: {exc}"
+        with app.state.search_lock:
+            app.state.search_service = None
+            app.state.search_startup_error = str(exc)
+            app.state.search_status = "error"
+            app.state.search_status_message = message
+            app.state.search_ready_at = None
+        print(message, flush=True)
 
 
 @app.on_event("shutdown")
@@ -50,15 +80,60 @@ def close_search_service() -> None:
         service.close()
 
 
+def search_status_payload() -> dict[str, Any]:
+    lock = getattr(app.state, "search_lock", None)
+    if lock is None:
+        return {
+            "status": "starting",
+            "ready": False,
+            "message": SEARCH_STARTING_MESSAGE,
+            "error": "",
+            "elapsed_seconds": 0.0,
+        }
+
+    with lock:
+        status = getattr(app.state, "search_status", "starting")
+        message = getattr(app.state, "search_status_message", SEARCH_STARTING_MESSAGE)
+        error = getattr(app.state, "search_startup_error", "")
+        started_at = getattr(app.state, "search_started_at", None)
+
+    elapsed = max(0.0, time.time() - started_at) if started_at else 0.0
+    return {
+        "status": status,
+        "ready": status == "ready",
+        "message": message,
+        "error": error,
+        "elapsed_seconds": round(elapsed, 1),
+    }
+
+
+def get_ready_search_service() -> SearchService:
+    payload = search_status_payload()
+    service = getattr(app.state, "search_service", None)
+    if service is not None:
+        return service
+
+    if payload["status"] == "starting":
+        raise HTTPException(status_code=503, detail=payload["message"])
+
+    detail = payload["error"] or payload["message"] or "Search service is not available."
+    raise HTTPException(status_code=503, detail=detail)
+
+
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "index.html",
         {
-            "startup_error": getattr(app.state, "search_startup_error", ""),
+            "service_status": search_status_payload(),
         },
     )
+
+
+@app.get("/api/service-status")
+def api_service_status() -> dict[str, Any]:
+    return search_status_payload()
 
 
 @app.get("/api/search")
@@ -72,10 +147,7 @@ def api_search(
     if not query:
         return {"query": query, "type": type, "limit": limit, "results": []}
 
-    service = getattr(app.state, "search_service", None)
-    if service is None:
-        detail = getattr(app.state, "search_startup_error", "") or "Search service is not available."
-        raise HTTPException(status_code=503, detail=detail)
+    service = get_ready_search_service()
 
     try:
         results = service.search(query, item_type=type, limit=limit, lexical_rerank=lexical_rerank)
