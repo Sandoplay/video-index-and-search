@@ -52,12 +52,18 @@ class AnalysisLibrary:
     def __init__(self, data_root: str | Path = "data"):
         self.data_root = Path(data_root)
         self.by_video_path: Dict[str, Dict[str, Any]] = {}
+        self.allowed_video_paths: set[str] = set()
+        self.allowed_frame_dirs: set[str] = set()
         self.scan()
 
     def scan(self) -> None:
         candidates: Dict[str, Dict[str, Any]] = {}
+        allowed_video_paths: set[str] = set()
+        allowed_frame_dirs: set[str] = set()
         if not self.data_root.exists():
             self.by_video_path = {}
+            self.allowed_video_paths = set()
+            self.allowed_frame_dirs = set()
             return
 
         for json_path in self.data_root.rglob("analysis_result.json"):
@@ -71,6 +77,10 @@ class AnalysisLibrary:
             if not video_path:
                 continue
 
+            resolved_video_path = _absolute_path(video_path)
+            allowed_video_paths.add(_normalize_path_key(resolved_video_path))
+            allowed_frame_dirs.add(_normalize_path_key(str((json_path.parent / "frames").resolve())))
+
             entry = {
                 "json_path": str(json_path),
                 "json_mtime": json_path.stat().st_mtime,
@@ -83,9 +93,24 @@ class AnalysisLibrary:
                     candidates[key] = entry
 
         self.by_video_path = candidates
+        self.allowed_video_paths = allowed_video_paths
+        self.allowed_frame_dirs = allowed_frame_dirs
 
     def get(self, video_path: str) -> Optional[Dict[str, Any]]:
         return self.by_video_path.get(video_path) or self.by_video_path.get(_normalize_path_key(video_path))
+
+    def allows_media_path(self, path: str | Path) -> bool:
+        candidate = Path(path).resolve()
+        normalized = _normalize_path_key(str(candidate))
+        if normalized in self.allowed_video_paths:
+            return True
+
+        for frame_dir in self.allowed_frame_dirs:
+            frame_root = Path(frame_dir)
+            if candidate == frame_root or frame_root in candidate.parents:
+                return True
+
+        return False
 
     def enrich(self, result: Dict[str, Any]) -> Dict[str, Any]:
         video_path = str(result.get("video_path") or "")

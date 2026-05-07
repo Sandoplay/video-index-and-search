@@ -187,11 +187,19 @@ def patched_attr(target, name, value):
         setattr(target, name, original)
 
 
-def make_args(root: Path, archive_completed_videos: bool = True, parallel_requests: int = 2):
+def make_args(
+    root: Path,
+    archive_completed_videos: bool = True,
+    parallel_requests: int = 2,
+    input_dir: Path | None = None,
+    completed_dir: Path | None = None,
+):
+    input_dir = input_dir or (root / "input")
+    completed_dir = completed_dir or (root / "completed")
     return argparse.Namespace(
-        input=str(root / "input"),
+        input=str(input_dir),
         output_dir=str(root / "processed"),
-        completed_dir=str(root / "completed"),
+        completed_dir=str(completed_dir),
         archive_completed_videos=archive_completed_videos,
         vlm_model="models/fake.gguf",
         whisper_backend="fake",
@@ -245,18 +253,19 @@ def run_batch(root: Path, videos, args=None):
     return args
 
 
-def run_cli(root: Path, extra_args=None):
+def run_cli(root: Path, extra_args=None, include_completed_dir: bool = True, input_dir: Path | None = None):
+    input_dir = input_dir or (root / "input")
     argv = [
         "main.py",
         "--input",
-        str(root / "input"),
+        str(input_dir),
         "--output_dir",
         str(root / "processed"),
-        "--completed_dir",
-        str(root / "completed"),
         "--vlm_model",
         "models/fake.gguf",
     ]
+    if include_completed_dir:
+        argv.extend(["--completed_dir", str(root / "completed")])
     if extra_args:
         argv.extend(extra_args)
 
@@ -329,6 +338,88 @@ def test_no_archive_flag_keeps_source_and_json_points_to_input():
     assert not (root / "completed" / "keep.mp4").exists()
     assert data["video_path"] == str(video)
     assert FakeVideoIndexer.indexed_paths == [str(result)]
+
+
+def test_default_completed_dir_uses_indexed_videos_inside_input():
+    root = reset_root("default_completed_dir")
+    source_dir = root / "source videos"
+    video = make_video(root, "outside.mp4")
+    source_dir.mkdir(parents=True, exist_ok=True)
+    relocated_video = source_dir / video.name
+    shutil.move(str(video), relocated_video)
+
+    args = make_args(
+        root,
+        input_dir=source_dir,
+        completed_dir=Path("data") / "completed_videos",
+    )
+
+    with patched_pipeline():
+        run_batch(root, [relocated_video], args)
+
+    result = result_path(root, relocated_video)
+    archived = source_dir / "indexed-videos" / "outside.mp4"
+    data = read_json(result)
+
+    assert not relocated_video.exists()
+    assert archived.exists()
+    assert data["video_path"] == str(archived)
+
+
+def test_explicit_completed_dir_override_is_still_honored():
+    root = reset_root("explicit_completed_override")
+    source_dir = root / "external-input"
+    nested_dir = source_dir / "nested"
+    nested_dir.mkdir(parents=True, exist_ok=True)
+    video = nested_dir / "keep-override.mp4"
+    video.write_bytes(b"fake video")
+
+    args = make_args(
+        root,
+        input_dir=source_dir,
+        completed_dir=root / "manual-completed",
+    )
+
+    with patched_pipeline():
+        run_batch(root, [video], args)
+
+    result = result_path(root, video)
+    archived = root / "manual-completed" / "nested" / "keep-override.mp4"
+    data = read_json(result)
+
+    assert not video.exists()
+    assert archived.exists()
+    assert data["video_path"] == str(archived)
+
+
+def test_cli_default_archive_dir_is_skipped_during_discovery():
+    root = reset_root("skip_default_archive_dir")
+    source_dir = root / "source videos"
+    archive_dir = source_dir / "indexed-videos"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archived_video = archive_dir / "done.mp4"
+    archived_video.write_bytes(b"archived video")
+    result = result_path(root, archived_video)
+    result.parent.mkdir(parents=True, exist_ok=True)
+    result.write_text(
+        json.dumps(
+            {
+                "video_path": str(archived_video),
+                "summary": "valid existing summary",
+                "segments": [{"start_frame": 0, "end_frame": 0, "start_time": 0.0, "end_time": 1.0, "description": "valid"}],
+                "analysis": [],
+                "timings": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with patched_pipeline():
+        run_cli(root, include_completed_dir=False, input_dir=source_dir)
+
+    assert archived_video.exists()
+    assert not (archive_dir / "indexed-videos" / "done.mp4").exists()
 
 
 def test_existing_valid_json_is_archived_and_source_removed():
@@ -638,6 +729,9 @@ TESTS = [
     test_vlm_exception_leaves_source_without_json_or_index,
     test_failed_vlm_result_leaves_source_without_json,
     test_no_archive_flag_keeps_source_and_json_points_to_input,
+    test_default_completed_dir_uses_indexed_videos_inside_input,
+    test_explicit_completed_dir_override_is_still_honored,
+    test_cli_default_archive_dir_is_skipped_during_discovery,
     test_existing_valid_json_is_archived_and_source_removed,
     test_existing_invalid_json_is_not_considered_complete,
     test_existing_invalid_json_is_reprocessed_by_main,

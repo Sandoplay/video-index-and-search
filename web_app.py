@@ -19,6 +19,19 @@ templates = Jinja2Templates(directory=str(PROJECT_ROOT / "templates"))
 app.mount("/static", StaticFiles(directory=str(PROJECT_ROOT / "static")), name="static")
 SEARCH_STARTING_MESSAGE = "Search service is starting. Loading the embedding backend can take a while."
 SEARCH_READY_MESSAGE = "Search service is ready."
+ALLOWED_MEDIA_SUFFIXES = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".gif",
+    ".mp4",
+    ".avi",
+    ".mkv",
+    ".mov",
+    ".webm",
+    ".m4v",
+}
 
 
 def resolve_project_file(path: str) -> Path:
@@ -27,13 +40,28 @@ def resolve_project_file(path: str) -> Path:
         candidate = PROJECT_ROOT / candidate
 
     resolved = candidate.resolve()
-    if resolved != PROJECT_ROOT and PROJECT_ROOT not in resolved.parents:
-        raise HTTPException(status_code=403, detail="Path is outside the project directory.")
-
     if not resolved.exists() or not resolved.is_file():
         raise HTTPException(status_code=404, detail="Media file not found.")
 
+    if resolved.suffix.lower() not in ALLOWED_MEDIA_SUFFIXES:
+        raise HTTPException(status_code=403, detail="Unsupported media file type.")
+
+    if resolved == PROJECT_ROOT or PROJECT_ROOT in resolved.parents:
+        return resolved
+
+    service = getattr(app.state, "search_service", None)
+    library = getattr(service, "library", None)
+    if library is not None and library.allows_media_path(resolved):
+        return resolved
+
+    raise HTTPException(status_code=403, detail="Path is outside the allowed media roots.")
+
     return resolved
+
+
+def reveal_in_explorer(path: Path) -> None:
+    normalized_path = str(path.resolve())
+    subprocess.Popen(["explorer.exe", "/select,", normalized_path])
 
 
 @app.on_event("startup")
@@ -167,7 +195,7 @@ def local_media(path: str) -> FileResponse:
 @app.post("/api/reveal-file")
 def reveal_file(path: str) -> dict:
     resolved = resolve_project_file(path)
-    subprocess.Popen(["explorer.exe", f"/select,{resolved}"])
+    reveal_in_explorer(resolved)
     return {"ok": True, "path": str(resolved)}
 
 

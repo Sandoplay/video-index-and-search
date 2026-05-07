@@ -8,6 +8,8 @@ from typing import List, Optional
 from .models import VideoMetadata, FrameMetadata
 
 class MediaProcessor:
+    FRAME_MAX_DIMENSION = 768
+
     def __init__(self, output_root: str = "data/processed"):
         self.output_root = output_root
         self.ffmpeg_bin = os.path.join("bin", "ffmpeg.exe")
@@ -51,6 +53,15 @@ class MediaProcessor:
             video_path=video_path,
             base_dir=base_dir,
             duration=duration
+        )
+
+    @classmethod
+    def frame_scale_filter(cls, max_dimension: int | None = None) -> str:
+        target = max_dimension or cls.FRAME_MAX_DIMENSION
+        return (
+            "scale="
+            f"'if(gte(iw,ih),{target},-2)':"
+            f"'if(gte(iw,ih),-2,{target})'"
         )
 
     def extract_audio(self, video_path: str) -> Optional[str]:
@@ -166,7 +177,7 @@ class MediaProcessor:
         cmd = [
             self.ffmpeg_bin, "-y",
             "-i", video_path,
-            "-vf", f"fps={target_raw_fps},scale=-2:768",
+            "-vf", f"fps={target_raw_fps},{self.frame_scale_filter()}",
             "-q:v", "3",
             output_pattern
         ]

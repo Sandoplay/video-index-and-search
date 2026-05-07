@@ -15,6 +15,9 @@ from src.models import VideoMetadata
 from src.indexer import VideoIndexer
 import concurrent.futures
 
+DEFAULT_COMPLETED_DIR_NAME = "indexed-videos"
+LEGACY_DEFAULT_COMPLETED_DIR = Path("data") / "completed_videos"
+
 def cleanup_gpu():
     """Aggressively clean up GPU memory (mostly for Whisper/Torch)."""
     if torch.cuda.is_available():
@@ -126,9 +129,19 @@ def write_analysis_result(meta: VideoMetadata) -> str:
     os.replace(temp_path, result_path)
     return result_path
 
+def resolved_completed_dir(args) -> Path:
+    raw_completed_dir = str(getattr(args, "completed_dir", "") or "").strip()
+    if raw_completed_dir and Path(raw_completed_dir) != LEGACY_DEFAULT_COMPLETED_DIR:
+        return Path(raw_completed_dir)
+
+    input_path = Path(args.input)
+    if input_path.is_dir():
+        return input_path / DEFAULT_COMPLETED_DIR_NAME
+    return input_path.parent / DEFAULT_COMPLETED_DIR_NAME
+
 def completed_video_path(original_path: str, args) -> Path:
     source = Path(original_path)
-    completed_root = Path(args.completed_dir)
+    completed_root = resolved_completed_dir(args)
     input_path = Path(args.input)
 
     if input_path.is_dir():
@@ -550,8 +563,8 @@ def main():
     parser = argparse.ArgumentParser(description="Batch Multimodal Video Analysis System")
     parser.add_argument("--input", type=str, required=True, help="Path to video file or directory")
     parser.add_argument("--output_dir", type=str, default="data/processed", help="Root directory for processed data")
-    parser.add_argument("--completed_dir", type=str, default=os.path.join("data", "completed_videos"), help="Directory for successfully analyzed source videos")
-    parser.add_argument("--archive_completed_videos", action=argparse.BooleanOptionalAction, default=True, help="Copy successful videos to completed_dir and remove them from input")
+    parser.add_argument("--completed_dir", type=str, default=os.path.join("data", "completed_videos"), help="Optional override for successfully analyzed source videos; default behavior creates an 'indexed-videos' folder inside the input directory")
+    parser.add_argument("--archive_completed_videos", action=argparse.BooleanOptionalAction, default=True, help="Copy successful videos to the completed archive directory and remove them from input")
 
     parser.add_argument("--vlm_model", type=str, default="models/Qwen3.5-9B-UD-Q4_K_XL.gguf", help="Path to GGUF model")
     #parser.add_argument("--vlm_model", type=str, default="models/Qwen3.5-9B-Q8_0.gguf", help="Path to GGUF model")
@@ -585,7 +598,10 @@ def main():
     if os.path.isfile(args.input):
         discovered_video_paths.append(args.input)
     elif os.path.isdir(args.input):
-        for root, _, files in os.walk(args.input):
+        completed_root = resolved_completed_dir(args).resolve()
+        for root, dirs, files in os.walk(args.input):
+            root_path = Path(root).resolve()
+            dirs[:] = [directory for directory in dirs if (root_path / directory).resolve() != completed_root]
             for file in files:
                 if file.lower().endswith(video_extensions):
                     discovered_video_paths.append(os.path.join(root, file))
