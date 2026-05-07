@@ -1,5 +1,5 @@
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --bg: #f6f7f4;
   --ink: #18201d;
   --muted: #63706b;
@@ -25,6 +25,7 @@
 }
 
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --bg: #111412;
   --ink: #edf3ef;
   --muted: #a7b4ae;
@@ -135,6 +136,12 @@ input[type="number"] {
   color: var(--ink);
   font: inherit;
   outline: none;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] input[type="search"],
+:root[data-theme="dark"] input[type="number"] {
+  color-scheme: dark;
 }
 
 input[type="search"] {
@@ -265,6 +272,11 @@ button:disabled {
   width: 16px;
   height: 16px;
   accent-color: var(--accent);
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] .highlight-control input {
+  color-scheme: dark;
 }
 
 .results-band {

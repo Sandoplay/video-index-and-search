@@ -9,3 +9,9 @@ src/__pycache__/models.cpython-313.pyc
 experiments/
 __pycache__/
 runtime_py_bundle/
+dist/
+build/
+*.spec
+.bootstrap/
+.uv-cache/
+.idea/

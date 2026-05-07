@@ -13,6 +13,7 @@ MODEL_CACHE_DIR = Path("models/.cache/huggingface")
 MINILM_MODEL_NAME = "all-MiniLM-L6-v2"
 MINILM_TABLE_NAME = "video_metadata"
 MINILM_VECTOR_DIM = 384
+DEFAULT_EMBEDDING_BACKEND = "qwen3-4b-gguf"
 
 QWEN3_GGUF_MODEL_PATH = Path("models/Qwen3-Embedding-0.6B-Q8_0.gguf")
 QWEN3_TABLE_NAME = "video_metadata_qwen3_1024"
@@ -257,7 +258,7 @@ def create_embedding_provider(
     context_size: int | None = None,
     parallel_slots: int | None = None,
 ) -> EmbeddingProvider:
-    selected_backend = (backend or os.getenv("EMBEDDING_BACKEND") or "minilm").strip().lower()
+    selected_backend = (backend or os.getenv("EMBEDDING_BACKEND") or DEFAULT_EMBEDDING_BACKEND).strip().lower()
 
     if selected_backend in {"minilm", "sentence-transformers", "sentence_transformers"}:
         return SentenceTransformerEmbeddingProvider(
@@ -305,7 +306,7 @@ def create_embedding_provider(
 
 
 def default_table_name_for_backend(backend: str | None = None) -> str:
-    selected_backend = (backend or os.getenv("EMBEDDING_BACKEND") or "minilm").strip().lower()
+    selected_backend = (backend or os.getenv("EMBEDDING_BACKEND") or DEFAULT_EMBEDDING_BACKEND).strip().lower()
     if selected_backend in {"minilm", "sentence-transformers", "sentence_transformers"}:
         return MINILM_TABLE_NAME
     if selected_backend in {"qwen3", "qwen3-gguf", "qwen3-0.6b", "qwen3-0.6b-gguf", "llama-cpp", "llamacpp"}:

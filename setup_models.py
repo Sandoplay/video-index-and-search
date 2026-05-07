@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import argparse
 import inspect
 import json
 import sys
@@ -18,6 +19,7 @@ BIN_DIR = REPO_ROOT / "bin"
 LLAMA_CPP_DIR = BIN_DIR / "llama-cpp"
 LLAMA_SERVER_PATH = LLAMA_CPP_DIR / "llama-server.exe"
 LLAMA_CPP_RELEASE_TAG = "b8064"
+WHISPER_CUDA12_RELEASE_TAG = "b9050"
 LLAMA_CPP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
 LLAMA_CPP_DOWNLOAD_DIR = BIN_DIR / "downloads"
 FFMPEG_DOWNLOAD_DIR = BIN_DIR / "downloads"
@@ -99,6 +101,22 @@ def llama_cpp_archives_for_release(release_tag: str) -> tuple[LlamaCppArchive, .
 
 LLAMA_CPP_ARCHIVES = llama_cpp_archives_for_release(LLAMA_CPP_RELEASE_TAG)
 
+WHISPER_CUDA12_ARCHIVE = LlamaCppArchive(
+    url=(
+        "https://github.com/ggml-org/llama.cpp/releases/download/"
+        f"{WHISPER_CUDA12_RELEASE_TAG}/cudart-llama-bin-win-cuda-12.4-x64.zip"
+    ),
+    filename="cudart-llama-bin-win-cuda-12.4-x64.zip",
+    display_size="~350 MB",
+    size_gb=0.35,
+    purpose="CUDA 12.4 runtime DLLs for faster-whisper",
+    required_files=(
+        LLAMA_CPP_DIR / "cublas64_12.dll",
+        LLAMA_CPP_DIR / "cublasLt64_12.dll",
+        LLAMA_CPP_DIR / "cudart64_12.dll",
+    ),
+)
+
 
 DEFAULT_MODELS = (
     ModelFile(
@@ -161,6 +179,19 @@ def print_llama_cpp_status(archives: Iterable[LlamaCppArchive] = LLAMA_CPP_ARCHI
             print(f"    - {path.relative_to(REPO_ROOT)}")
 
 
+def missing_whisper_cuda12_archive(archive: LlamaCppArchive = WHISPER_CUDA12_ARCHIVE) -> LlamaCppArchive | None:
+    return archive if any(not path.exists() for path in archive.required_files) else None
+
+
+def print_whisper_cuda12_status(archive: LlamaCppArchive = WHISPER_CUDA12_ARCHIVE) -> None:
+    missing = [path for path in archive.required_files if not path.exists()]
+    status = "present" if not missing else "missing"
+    print("faster-whisper CUDA files:")
+    print(f"  [{status}] {archive.purpose}")
+    for path in missing:
+        print(f"    - {path.relative_to(REPO_ROOT)}")
+
+
 def missing_models(models: Iterable[ModelFile] = DEFAULT_MODELS) -> list[ModelFile]:
     return [model for model in models if not model.target_path.exists()]
 
@@ -180,6 +211,11 @@ def prompt_download(total_size_gb: float) -> bool:
 
 def prompt_download_llama_cpp(total_size_gb: float) -> bool:
     answer = input(f"\nDownload missing llama.cpp files now? (~{total_size_gb:.1f} GB) [Y/n]: ").strip().lower()
+    return answer in {"", "y", "yes"}
+
+
+def prompt_download_whisper_cuda(total_size_gb: float) -> bool:
+    answer = input(f"\nDownload missing faster-whisper CUDA files now? (~{total_size_gb:.1f} GB) [Y/n]: ").strip().lower()
     return answer in {"", "y", "yes"}
 
 
@@ -345,26 +381,49 @@ def validate_prerequisites() -> bool:
     return True
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Download default local runtime binaries and model files.")
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Download all missing default files without interactive prompts.",
+    )
+    parser.add_argument(
+        "--llama-release",
+        choices=["prompt", "default", "latest"],
+        default="prompt",
+        help="llama.cpp release choice when files are missing. Default keeps the interactive prompt.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     print("Model setup for ml-vid-indexer-search\n")
 
     prerequisites_ok = validate_prerequisites()
     print_ffmpeg_status()
     print_llama_cpp_status()
+    print_whisper_cuda12_status()
     print_model_status()
 
     missing_ffmpeg = missing_ffmpeg_archive()
     if missing_ffmpeg:
         print(f"\nMissing FFmpeg archive, approximately {missing_ffmpeg.size_gb:.1f} GB total:")
         print(f"  - {missing_ffmpeg.purpose}: {missing_ffmpeg.filename} ({missing_ffmpeg.display_size})")
-        if prompt_download_ffmpeg(missing_ffmpeg.size_gb):
+        if args.yes or prompt_download_ffmpeg(missing_ffmpeg.size_gb):
             download_ffmpeg_archive(missing_ffmpeg)
         else:
             print("FFmpeg download skipped.")
 
     missing_archives = missing_llama_cpp_archives()
     if missing_archives:
-        selected_release = prompt_llama_cpp_release()
+        if args.llama_release == "latest":
+            selected_release = "latest"
+        elif args.llama_release == "default" or args.yes:
+            selected_release = LLAMA_CPP_RELEASE_TAG
+        else:
+            selected_release = prompt_llama_cpp_release()
         if selected_release == "latest":
             selected_release = fetch_latest_llama_cpp_release_tag()
             print(f"Latest llama.cpp release: {selected_release}")
@@ -375,15 +434,27 @@ def main() -> int:
         for archive in missing_archives:
             print(f"  - {archive.purpose}: {archive.filename} ({archive.display_size})")
 
-        if prompt_download_llama_cpp(total_size_gb):
+        if args.yes or prompt_download_llama_cpp(total_size_gb):
             for archive in missing_archives:
                 download_llama_cpp_archive(archive)
         else:
             print("llama.cpp download skipped.")
 
+    missing_whisper_cuda = missing_whisper_cuda12_archive()
+    if missing_whisper_cuda:
+        print(f"\nMissing faster-whisper CUDA archive, approximately {missing_whisper_cuda.size_gb:.1f} GB total:")
+        print(
+            f"  - {missing_whisper_cuda.purpose}: "
+            f"{missing_whisper_cuda.filename} ({missing_whisper_cuda.display_size})"
+        )
+        if args.yes or prompt_download_whisper_cuda(missing_whisper_cuda.size_gb):
+            download_llama_cpp_archive(missing_whisper_cuda)
+        else:
+            print("faster-whisper CUDA download skipped. Use --whisper_device cpu if you do not install these DLLs.")
+
     missing = missing_models()
     if not missing:
-        if missing_ffmpeg_archive() or missing_llama_cpp_archives():
+        if missing_ffmpeg_archive() or missing_llama_cpp_archives() or missing_whisper_cuda12_archive():
             print("\nAll default model files are already present.")
         else:
             print("\nAll default FFmpeg, llama.cpp, and model files are already present. Nothing to download.")
@@ -398,7 +469,7 @@ def main() -> int:
     if not prerequisites_ok:
         return 1
 
-    if not prompt_download(total_size_gb):
+    if not args.yes and not prompt_download(total_size_gb):
         print("Download skipped.")
         return 0
 

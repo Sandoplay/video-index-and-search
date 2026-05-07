@@ -1,0 +1,33 @@
+{
+  "python_version": "3.12",
+  "uv_zip_url": "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip",
+  "requirements_path": "requirements.txt",
+  "runtime_script": "bootstrap_runtime.py",
+  "default_embedding_backend": "qwen3-4b-gguf",
+  "commands": {
+    "setup": [
+      "setup_models.py",
+      "--yes"
+    ],
+    "web": [
+      "web_app.py"
+    ],
+    "index": [
+      "main.py",
+      "--input",
+      "{input}",
+      "--output_dir",
+      "data/processed",
+      "--max_frames",
+      "50",
+      "--batch_size",
+      "0",
+      "--parallel_requests",
+      "2",
+      "--server_parallel",
+      "2",
+      "--embedding_backend",
+      "{embedding_backend}"
+    ]
+  }
+}

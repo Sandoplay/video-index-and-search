@@ -7,3 +7,4 @@ sentence-transformers
 fastapi
 uvicorn
 jinja2
+huggingface_hub
