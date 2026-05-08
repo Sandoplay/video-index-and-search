@@ -79,6 +79,7 @@ def bootstrap_env() -> dict[str, str]:
     env = os.environ.copy()
     env["UV_PYTHON_INSTALL_DIR"] = str(PYTHON_INSTALL_DIR)
     env["UV_CACHE_DIR"] = str(ROOT / ".uv-cache")
+    env["PYTHONUNBUFFERED"] = "1"
     return env
 
 
@@ -228,7 +229,7 @@ def launch_runtime(runtime_script: str, log: callable) -> None:
         raise FileNotFoundError(f"Runtime script not found: {runtime_script}")
     log(f"Launching runtime menu: {runtime_script}")
     subprocess.Popen(
-        [str(VENV_PYTHON), str(script)],
+        [str(VENV_PYTHON), "-u", str(script)],
         cwd=ROOT,
         env=bootstrap_env(),
     )

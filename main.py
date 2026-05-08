@@ -59,6 +59,15 @@ def sanitized_video_name(video_path: str) -> str:
 def analysis_result_path(output_dir: str, video_path: str) -> str:
     return os.path.join(output_dir, sanitized_video_name(video_path), "analysis_result.json")
 
+
+def merged_video_path_aliases(existing_aliases, *paths: str) -> list[str]:
+    aliases: list[str] = []
+    for value in list(existing_aliases or []) + [path for path in paths if path]:
+        normalized = str(value or "").strip()
+        if normalized and normalized not in aliases:
+            aliases.append(normalized)
+    return aliases
+
 def is_valid_analysis_result(result_path: str) -> bool:
     if not os.path.exists(result_path):
         return False
@@ -80,6 +89,12 @@ def is_valid_analysis_result(result_path: str) -> bool:
     return summary not in failed_summaries and bool(segments)
 
 def build_analysis_result(meta: VideoMetadata) -> dict:
+    meta.timings["indexed_video_path_aliases"] = merged_video_path_aliases(
+        meta.timings.get("indexed_video_path_aliases"),
+        meta.timings.get("source_video_path", ""),
+        meta.timings.get("archived_video_path", ""),
+        meta.video_path,
+    )
     segments_data = [
         {
             "start_frame": segment.start_frame,
@@ -203,6 +218,11 @@ def finalize_successful_video(meta: VideoMetadata, args) -> str:
     archived_path = copy_video_to_completed(original_path, args)
     meta.timings["source_video_path"] = original_path
     meta.timings["archived_video_path"] = archived_path
+    meta.timings["indexed_video_path_aliases"] = merged_video_path_aliases(
+        meta.timings.get("indexed_video_path_aliases"),
+        original_path,
+        archived_path,
+    )
     meta.video_path = archived_path
 
     result_path = write_analysis_result(meta)
@@ -218,10 +238,17 @@ def finalize_existing_analysis(video_path: str, args) -> str:
     with open(result_path, "r", encoding="utf-8") as f:
         result_data = json.load(f)
 
+    previous_video_path = str(result_data.get("video_path") or "").strip()
     result_data["video_path"] = archived_path
     timings = result_data.setdefault("timings", {})
     timings["source_video_path"] = video_path
     timings["archived_video_path"] = archived_path
+    timings["indexed_video_path_aliases"] = merged_video_path_aliases(
+        timings.get("indexed_video_path_aliases"),
+        previous_video_path,
+        video_path,
+        archived_path,
+    )
 
     temp_path = f"{result_path}.tmp"
     with open(temp_path, "w", encoding="utf-8") as f:

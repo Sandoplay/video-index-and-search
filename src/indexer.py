@@ -96,11 +96,36 @@ class VideoIndexer:
     def close(self) -> None:
         self.provider.close()
 
-    def _records_from_json(self, json_path: str | Path) -> Tuple[str, List[Dict[str, Any]]]:
+    @staticmethod
+    def _video_path_aliases(data: Dict[str, Any], primary_video_path: str) -> List[str]:
+        timings = data.get("timings") or {}
+        aliases: List[str] = []
+        raw_aliases = [
+            primary_video_path,
+            timings.get("source_video_path", ""),
+            timings.get("archived_video_path", ""),
+        ]
+        stored_aliases = timings.get("indexed_video_path_aliases") or []
+        if isinstance(stored_aliases, list):
+            raw_aliases.extend(stored_aliases)
+
+        for raw_alias in raw_aliases:
+            normalized = str(raw_alias or "").strip()
+            if normalized and normalized not in aliases:
+                aliases.append(normalized)
+        return aliases
+
+    def _delete_existing_records(self, video_paths: List[str]) -> None:
+        for video_path in video_paths:
+            safe_video_path = video_path.replace("'", "''")
+            self.table.delete(f"video_path = '{safe_video_path}'")
+            print(f"  -> Cleared old records for {video_path}")
+
+    def _records_from_json(self, json_path: str | Path) -> Tuple[str, List[Dict[str, Any]], List[str]]:
         json_file = Path(json_path)
         if not json_file.exists():
             print(f"File not found: {json_path}")
-            return "", []
+            return "", [], []
 
         with open(json_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -163,7 +188,7 @@ class VideoIndexer:
                             "type": "frame",
                         })
 
-        return video_path, records
+        return video_path, records, self._video_path_aliases(data, video_path)
         
     def index_json(self, json_path: str | Path):
         """Parse an analysis_result.json file and insert its contents into the database."""
@@ -173,7 +198,7 @@ class VideoIndexer:
             return
             
         print(f"Indexing: {json_file.name}...")
-        video_path, records = self._records_from_json(json_file)
+        video_path, records, delete_paths = self._records_from_json(json_file)
                     
         if records:
             print(f"  -> Generating {len(records)} embeddings...")
@@ -183,11 +208,7 @@ class VideoIndexer:
             # But simple insert is fine for now, let's just insert.
             # To be safer about re-runs, we delete existing records for this video first.
             try:
-                # LanceDB SQL filters match Windows backslashes literally.
-                # Escaping them as "\\" prevents old rows from being deleted.
-                safe_video_path = video_path.replace("'", "''")
-                self.table.delete(f"video_path = '{safe_video_path}'")
-                print(f"  -> Cleared old records for {video_path}")
+                self._delete_existing_records(delete_paths or [video_path])
             except Exception as e:
                 print(f"  -> Warning: Could not delete old records (might be empty): {e}")
                 
@@ -203,14 +224,14 @@ class VideoIndexer:
         embedding_batch_size: int = 32,
         add_batch_size: int = 512,
     ) -> None:
-        parsed: List[Tuple[str, List[Dict[str, Any]]]] = []
+        parsed: List[Tuple[str, List[Dict[str, Any]], List[str]]] = []
         all_records: List[Dict[str, Any]] = []
 
         for json_path in json_paths:
-            video_path, records = self._records_from_json(json_path)
+            video_path, records, delete_paths = self._records_from_json(json_path)
             if not video_path or not records:
                 continue
-            parsed.append((video_path, records))
+            parsed.append((video_path, records, delete_paths))
             all_records.extend(records)
 
         if not all_records:
@@ -225,10 +246,9 @@ class VideoIndexer:
             print(f"  -> Generating embeddings {start + 1}-{end}/{len(all_records)}...")
             self._attach_embeddings(batch)
 
-        for video_path, _ in parsed:
+        for video_path, _, delete_paths in parsed:
             try:
-                safe_video_path = video_path.replace("'", "''")
-                self.table.delete(f"video_path = '{safe_video_path}'")
+                self._delete_existing_records(delete_paths or [video_path])
             except Exception as e:
                 print(f"  -> Warning: Could not delete old records for {video_path}: {e}")
 

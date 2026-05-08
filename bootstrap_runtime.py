@@ -58,6 +58,16 @@ def normalize_embedding_backend(value: str) -> str:
     return normalized if normalized in EMBEDDING_BACKENDS else "qwen3-4b-gguf"
 
 
+def build_command_args(command: list[str], replacements: dict[str, str] | None = None) -> list[str]:
+    replacements = replacements or {}
+    resolved = [part.format(**replacements) for part in command]
+    entrypoint = resolved[0]
+    entry_path = ROOT / entrypoint
+    if entry_path.suffix.lower() == ".py":
+        return [str(python_executable()), "-u", str(entry_path), *resolved[1:]]
+    return [str(entry_path if entry_path.exists() else entrypoint), *resolved[1:]]
+
+
 class RuntimeState:
     def __init__(self, config: dict) -> None:
         self.config = config
@@ -96,13 +106,13 @@ class RuntimeState:
             self.log(f"Command is missing in bootstrap_config.json: {name}")
             return
 
-        replacements = {
-            "embedding_backend": self.embedding_backend,
-            **(replacements or {}),
-        }
-        resolved = [part.format(**replacements) for part in command]
-        script = ROOT / resolved[0]
-        args = [str(python_executable()), str(script), *resolved[1:]]
+        args = build_command_args(
+            command,
+            {
+                "embedding_backend": self.embedding_backend,
+                **(replacements or {}),
+            },
+        )
         threading.Thread(target=self.run_subprocess, args=(args, name), daemon=True).start()
 
     def run_subprocess(self, args: list[str], name: str) -> None:
@@ -122,6 +132,7 @@ class RuntimeState:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
+                bufsize=1,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -575,6 +586,7 @@ def runtime_env() -> dict[str, str]:
     env = os.environ.copy()
     scripts_dir = ROOT / ".venv" / "Scripts"
     env["PATH"] = str(scripts_dir) + os.pathsep + env.get("PATH", "")
+    env["PYTHONUNBUFFERED"] = "1"
     return env
 
 

@@ -451,6 +451,45 @@ def test_existing_valid_json_is_archived_and_source_removed():
     assert archived.exists()
     assert data["video_path"] == str(archived)
     assert data["timings"]["source_video_path"] == str(video)
+    assert data["timings"]["indexed_video_path_aliases"] == [
+        str(video),
+        str(archived),
+    ]
+
+
+def test_existing_valid_json_preserves_previous_video_path_alias_for_reindex_cleanup():
+    root = reset_root("existing_valid_aliases")
+    video = make_video(root, "already-alias.mp4")
+    result = result_path(root, video)
+    result.parent.mkdir(parents=True, exist_ok=True)
+    old_archived = root / "completed" / "already-alias-old.mp4"
+    old_archived.parent.mkdir(parents=True, exist_ok=True)
+    old_archived.write_bytes(b"old archived")
+    result.write_text(
+        json.dumps(
+            {
+                "video_path": str(old_archived),
+                "summary": "valid existing summary",
+                "segments": [{"start_frame": 0, "end_frame": 0, "start_time": 0.0, "end_time": 1.0, "description": "valid"}],
+                "analysis": [],
+                "timings": {"indexed_video_path_aliases": [str(video)]},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    args = make_args(root)
+    pipeline.finalize_existing_analysis(str(video), args)
+    data = read_json(result)
+    archived = root / "completed" / "already-alias.mp4"
+
+    assert data["video_path"] == str(archived)
+    assert data["timings"]["indexed_video_path_aliases"] == [
+        str(video),
+        str(old_archived),
+        str(archived),
+    ]
 
 
 def test_existing_invalid_json_is_not_considered_complete():
@@ -733,6 +772,7 @@ TESTS = [
     test_explicit_completed_dir_override_is_still_honored,
     test_cli_default_archive_dir_is_skipped_during_discovery,
     test_existing_valid_json_is_archived_and_source_removed,
+    test_existing_valid_json_preserves_previous_video_path_alias_for_reindex_cleanup,
     test_existing_invalid_json_is_not_considered_complete,
     test_existing_invalid_json_is_reprocessed_by_main,
     test_completed_destination_collision_uses_suffix,
