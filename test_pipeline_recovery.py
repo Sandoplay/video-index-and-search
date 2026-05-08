@@ -22,35 +22,41 @@ class FakeMediaProcessor:
     def __init__(self, output_root: str):
         self.output_root = Path(output_root)
 
-    def _base_dir(self, video_path: str) -> Path:
-        return self.output_root / pipeline.sanitized_video_name(video_path)
+    def _base_dir(self, video_path: str, output_key: str | None = None) -> Path:
+        return self.output_root / pipeline.sanitized_video_name(video_path, output_key)
 
-    def prepare_video_metadata(self, video_path: str) -> VideoMetadata:
+    def prepare_video_metadata(
+        self,
+        video_path: str,
+        output_key: str | None = None,
+        source_duration: float | None = None,
+    ) -> VideoMetadata:
         if Path(video_path).stem in type(self).fail_prepare:
             raise RuntimeError("simulated metadata failure")
 
-        base_dir = self._base_dir(video_path)
+        base_dir = self._base_dir(video_path, output_key)
         base_dir.mkdir(parents=True, exist_ok=True)
         return VideoMetadata(
             video_path=video_path,
             base_dir=str(base_dir),
-            duration=1.0,
+            output_key=output_key,
+            duration=source_duration if source_duration is not None else 1.0,
         )
 
-    def extract_audio(self, video_path: str) -> str:
+    def extract_audio(self, video_path: str, output_key: str | None = None) -> str:
         if Path(video_path).stem in type(self).fail_audio:
             raise RuntimeError("simulated audio extraction failure")
 
-        audio_path = self._base_dir(video_path) / "audio.wav"
+        audio_path = self._base_dir(video_path, output_key) / "audio.wav"
         audio_path.parent.mkdir(parents=True, exist_ok=True)
         audio_path.write_bytes(b"fake audio")
         return str(audio_path)
 
-    def extract_frames(self, video_path: str, max_frames: int = 40):
+    def extract_frames(self, video_path: str, max_frames: int = 40, output_key: str | None = None):
         if Path(video_path).stem in type(self).fail_frames:
             raise RuntimeError("simulated frame extraction failure")
 
-        frames_dir = self._base_dir(video_path) / "frames"
+        frames_dir = self._base_dir(video_path, output_key) / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
         frame_path = frames_dir / "frame_0001.jpg"
         frame_path.write_bytes(b"fake frame")
@@ -149,6 +155,7 @@ def patched_pipeline():
     original_vision_analyzer = pipeline.VisionAnalyzer
     original_indexer = pipeline.VideoIndexer
     original_cleanup_gpu = pipeline.cleanup_gpu
+    original_collect_source_metadata = pipeline.collect_source_metadata
 
     FakeVideoIndexer.indexed_paths = []
     FakeMediaProcessor.fail_prepare = set()
@@ -167,6 +174,11 @@ def patched_pipeline():
     pipeline.VisionAnalyzer = FakeVisionAnalyzer
     pipeline.VideoIndexer = FakeVideoIndexer
     pipeline.cleanup_gpu = lambda: None
+    pipeline.collect_source_metadata = lambda video_path, duration_seconds=None: {
+        "filename": Path(video_path).name,
+        "filesize_bytes": Path(video_path).stat().st_size,
+        "duration_seconds": round(float(duration_seconds) if duration_seconds is not None else 1.0, 3),
+    }
     try:
         yield
     finally:
@@ -175,6 +187,7 @@ def patched_pipeline():
         pipeline.VisionAnalyzer = original_vision_analyzer
         pipeline.VideoIndexer = original_indexer
         pipeline.cleanup_gpu = original_cleanup_gpu
+        pipeline.collect_source_metadata = original_collect_source_metadata
 
 
 @contextmanager
@@ -193,6 +206,7 @@ def make_args(
     parallel_requests: int = 2,
     input_dir: Path | None = None,
     completed_dir: Path | None = None,
+    reindex_existing: bool = False,
 ):
     input_dir = input_dir or (root / "input")
     completed_dir = completed_dir or (root / "completed")
@@ -219,6 +233,7 @@ def make_args(
         embedding_table=None,
         embedding_ctx_size=None,
         embedding_parallel=1,
+        reindex_existing=reindex_existing,
         verbose=False,
     )
 
@@ -243,8 +258,8 @@ def read_json(path: Path) -> dict:
         return json.load(f)
 
 
-def result_path(root: Path, video_path: Path) -> Path:
-    return Path(pipeline.analysis_result_path(str(root / "processed"), str(video_path)))
+def result_path(root: Path, video_path: Path, output_key: str | None = None) -> Path:
+    return Path(pipeline.analysis_result_path(str(root / "processed"), str(video_path), output_key=output_key))
 
 
 def run_batch(root: Path, videos, args=None):
@@ -291,6 +306,11 @@ def test_success_archives_deletes_source_and_indexes():
     assert not video.exists()
     assert archived.exists()
     assert data["video_path"] == str(archived)
+    assert data["source_metadata"] == {
+        "filename": "ok.mp4",
+        "filesize_bytes": len(b"fake video"),
+        "duration_seconds": 1.0,
+    }
     assert pipeline.is_valid_analysis_result(str(result))
     assert FakeVideoIndexer.indexed_paths == [str(result)]
     assert args.archive_completed_videos is True
@@ -492,6 +512,161 @@ def test_existing_valid_json_preserves_previous_video_path_alias_for_reindex_cle
     ]
 
 
+def test_exact_match_skips_pipeline_and_reuses_existing_result():
+    root = reset_root("exact_match_skip")
+    video = make_video(root, "same.mp4", b"123456")
+    result = result_path(root, video)
+    result.parent.mkdir(parents=True, exist_ok=True)
+    result.write_text(
+        json.dumps(
+            {
+                "video_path": str(root / "completed" / "same.mp4"),
+                "source_metadata": {
+                    "filename": "same.mp4",
+                    "filesize_bytes": len(b"123456"),
+                    "duration_seconds": 1.0,
+                },
+                "summary": "valid existing summary",
+                "segments": [{"start_frame": 0, "end_frame": 0, "start_time": 0.0, "end_time": 1.0, "description": "valid"}],
+                "analysis": [],
+                "timings": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with patched_pipeline():
+        run_cli(root)
+
+    archived = root / "completed" / "same.mp4"
+    data = read_json(result)
+    assert not video.exists()
+    assert archived.exists()
+    assert data["source_metadata"]["filename"] == "same.mp4"
+    assert FakeVideoIndexer.indexed_paths == []
+
+
+def test_exact_match_reindexes_when_flag_enabled():
+    root = reset_root("exact_match_reindex")
+    video = make_video(root, "same.mp4", b"123456")
+    result = result_path(root, video)
+    result.parent.mkdir(parents=True, exist_ok=True)
+    result.write_text(
+        json.dumps(
+            {
+                "video_path": str(root / "completed" / "same.mp4"),
+                "source_metadata": {
+                    "filename": "same.mp4",
+                    "filesize_bytes": len(b"123456"),
+                    "duration_seconds": 1.0,
+                },
+                "summary": "valid existing summary",
+                "segments": [{"start_frame": 0, "end_frame": 0, "start_time": 0.0, "end_time": 1.0, "description": "valid"}],
+                "analysis": [],
+                "timings": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with patched_pipeline():
+        run_cli(root, extra_args=["--reindex_existing"])
+
+    archived = root / "completed" / "same.mp4"
+    data = read_json(result)
+    assert not video.exists()
+    assert archived.exists()
+    assert data["source_metadata"]["filename"] == "same.mp4"
+    assert FakeVideoIndexer.indexed_paths == [str(result)]
+
+
+def test_same_name_conflict_uses_separate_output_folder_without_overwriting_existing():
+    root = reset_root("same_name_conflict")
+    existing_video_path = root / "completed" / "clip.mp4"
+    existing_video_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_video_path.write_bytes(b"old")
+    existing_result = result_path(root, root / "input" / "clip.mp4")
+    existing_result.parent.mkdir(parents=True, exist_ok=True)
+    existing_result.write_text(
+        json.dumps(
+            {
+                "video_path": str(existing_video_path),
+                "source_metadata": {
+                    "filename": "clip.mp4",
+                    "filesize_bytes": len(b"old"),
+                    "duration_seconds": 1.0,
+                },
+                "summary": "valid existing summary",
+                "segments": [{"start_frame": 0, "end_frame": 0, "start_time": 0.0, "end_time": 1.0, "description": "valid"}],
+                "analysis": [],
+                "timings": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    conflicting_bytes = b"new and different"
+    conflicting_video = make_video(root, "clip.mp4", conflicting_bytes)
+    conflict_output_key = pipeline.conflict_output_key(
+        str(conflicting_video),
+        {
+            "filename": "clip.mp4",
+            "filesize_bytes": len(conflicting_bytes),
+            "duration_seconds": 1.0,
+        },
+    )
+
+    with patched_pipeline():
+        run_cli(root)
+
+    conflict_result = result_path(root, conflicting_video, output_key=conflict_output_key)
+    assert existing_result.exists()
+    assert conflict_result.exists()
+    assert existing_result != conflict_result
+    assert read_json(existing_result)["summary"] == "valid existing summary"
+    assert read_json(conflict_result)["source_metadata"]["filesize_bytes"] == len(conflicting_bytes)
+
+
+def test_legacy_json_without_source_metadata_falls_back_conservatively_to_conflict():
+    root = reset_root("legacy_conflict_fallback")
+    existing_result = result_path(root, root / "input" / "legacy.mp4")
+    existing_result.parent.mkdir(parents=True, exist_ok=True)
+    existing_result.write_text(
+        json.dumps(
+            {
+                "video_path": str(root / "completed" / "legacy.mp4"),
+                "duration": 1.0,
+                "summary": "valid existing summary",
+                "segments": [{"start_frame": 0, "end_frame": 0, "start_time": 0.0, "end_time": 1.0, "description": "valid"}],
+                "analysis": [],
+                "timings": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    legacy_bytes = b"brand new"
+    new_video = make_video(root, "legacy.mp4", legacy_bytes)
+    conflict_output_key = pipeline.conflict_output_key(
+        str(new_video),
+        {
+            "filename": "legacy.mp4",
+            "filesize_bytes": len(legacy_bytes),
+            "duration_seconds": 1.0,
+        },
+    )
+
+    with patched_pipeline():
+        run_cli(root)
+
+    assert existing_result.exists()
+    assert result_path(root, new_video, output_key=conflict_output_key).exists()
+
+
 def test_existing_invalid_json_is_not_considered_complete():
     root = reset_root("existing_invalid")
     video = make_video(root, "invalid.mp4")
@@ -519,12 +694,13 @@ def test_existing_invalid_json_is_reprocessed_by_main():
         run_cli(root)
 
     archived = root / "completed" / "invalid-main.mp4"
-    data = read_json(result)
+    new_result = result_path(root, video, output_key="invalid-main_2")
+    data = read_json(new_result)
     assert not video.exists()
     assert archived.exists()
     assert data["video_path"] == str(archived)
     assert "valid summary" in data["summary"]
-    assert FakeVideoIndexer.indexed_paths == [str(result)]
+    assert FakeVideoIndexer.indexed_paths == [str(new_result)]
 
 
 def test_completed_destination_collision_uses_suffix():
@@ -614,12 +790,13 @@ def test_main_recovers_valid_json_with_source_left_after_delete_failure():
     result = result_path(root, video)
     archived = root / "completed" / "recover.mp4"
     archived.parent.mkdir(parents=True, exist_ok=True)
-    archived.write_bytes(b"already copied")
+    archived.write_bytes(b"fake video")
     result.parent.mkdir(parents=True, exist_ok=True)
     result.write_text(
         json.dumps(
             {
                 "video_path": str(archived),
+                "duration": 1.0,
                 "summary": "valid existing summary",
                 "segments": [{"start_frame": 0, "end_frame": 0, "start_time": 0.0, "end_time": 1.0, "description": "valid"}],
                 "analysis": [],
@@ -638,7 +815,7 @@ def test_main_recovers_valid_json_with_source_left_after_delete_failure():
     assert archived.exists()
     assert data["video_path"] == str(root / "completed" / "recover_1.mp4")
     assert Path(data["video_path"]).exists()
-    assert FakeVideoIndexer.indexed_paths == [str(result)]
+    assert FakeVideoIndexer.indexed_paths == []
 
 
 def test_async_finalizer_does_not_block_next_vlm_submit():
@@ -773,6 +950,10 @@ TESTS = [
     test_cli_default_archive_dir_is_skipped_during_discovery,
     test_existing_valid_json_is_archived_and_source_removed,
     test_existing_valid_json_preserves_previous_video_path_alias_for_reindex_cleanup,
+    test_exact_match_skips_pipeline_and_reuses_existing_result,
+    test_exact_match_reindexes_when_flag_enabled,
+    test_same_name_conflict_uses_separate_output_folder_without_overwriting_existing,
+    test_legacy_json_without_source_metadata_falls_back_conservatively_to_conflict,
     test_existing_invalid_json_is_not_considered_complete,
     test_existing_invalid_json_is_reprocessed_by_main,
     test_completed_destination_collision_uses_suffix,

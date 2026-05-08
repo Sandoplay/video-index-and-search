@@ -7,6 +7,12 @@ from pathlib import Path
 from typing import List, Optional
 from .models import VideoMetadata, FrameMetadata
 
+
+def sanitize_output_key(video_path: str, output_key: Optional[str] = None) -> str:
+    if output_key:
+        return re.sub(r'[^\w\-]', '_', output_key)
+    return re.sub(r'[^\w\-]', '_', Path(video_path).stem)
+
 class MediaProcessor:
     FRAME_MAX_DIMENSION = 768
 
@@ -38,20 +44,27 @@ class MediaProcessor:
             print(f"Error getting duration: {e}")
             return 0.0
 
-    def prepare_video_metadata(self, video_path: str) -> VideoMetadata:
+    def _output_key(self, video_path: str, output_key: Optional[str] = None) -> str:
+        return sanitize_output_key(video_path, output_key)
+
+    def prepare_video_metadata(
+        self,
+        video_path: str,
+        output_key: Optional[str] = None,
+        source_duration: Optional[float] = None,
+    ) -> VideoMetadata:
         """Creates the output directory and base metadata structure."""
-        video_name = Path(video_path).stem
-        # Sanitize name
-        video_name = re.sub(r'[^\w\-]', '_', video_name)
+        video_name = self._output_key(video_path, output_key)
         
         base_dir = os.path.join(self.output_root, video_name)
         os.makedirs(base_dir, exist_ok=True)
         
-        duration = self._get_video_duration(video_path)
+        duration = source_duration if source_duration is not None else self._get_video_duration(video_path)
         
         return VideoMetadata(
             video_path=video_path,
             base_dir=base_dir,
+            output_key=video_name,
             duration=duration
         )
 
@@ -64,12 +77,11 @@ class MediaProcessor:
             f"'if(gte(iw,ih),-2,{target})'"
         )
 
-    def extract_audio(self, video_path: str) -> Optional[str]:
+    def extract_audio(self, video_path: str, output_key: Optional[str] = None) -> Optional[str]:
         """Extracts audio to WAV (16kHz mono) for Whisper."""
         try:
             # We assume metadata is already prepared or we just infer the path
-            video_name = Path(video_path).stem
-            video_name = re.sub(r'[^\w\-]', '_', video_name)
+            video_name = self._output_key(video_path, output_key)
             output_path = os.path.join(self.output_root, video_name, "audio.wav")
             
             if os.path.exists(output_path):
@@ -91,13 +103,17 @@ class MediaProcessor:
             print(f"Audio extraction failed: {e}")
             return None
 
-    def extract_frames(self, video_path: str, max_frames: int = 40) -> List[FrameMetadata]:
+    def extract_frames(
+        self,
+        video_path: str,
+        max_frames: int = 40,
+        output_key: Optional[str] = None,
+    ) -> List[FrameMetadata]:
         """
         Adaptively extracts frames based on content and duration.
         - max_frames: Maximum limit of frames to output (downsamples if more are found).
         """
-        video_name = Path(video_path).stem
-        video_name = re.sub(r'[^\w\-]', '_', video_name)
+        video_name = self._output_key(video_path, output_key)
         frames_dir = os.path.join(self.output_root, video_name, "frames")
         
         # Clean previous frames to avoid mixing

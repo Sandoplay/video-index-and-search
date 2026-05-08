@@ -47,6 +47,7 @@ def test_runtime_env_enables_unbuffered_python() -> None:
     env = bootstrap_runtime.runtime_env()
 
     assert env["PYTHONUNBUFFERED"] == "1"
+    assert env["BOOTSTRAP_RUNTIME_EVENTS"] == "1"
     assert str(bootstrap_runtime.ROOT / ".venv" / "Scripts") in env["PATH"]
 
 
@@ -83,11 +84,92 @@ def test_run_subprocess_uses_line_buffered_text_mode() -> None:
     assert kwargs["encoding"] == "utf-8"
 
 
+def test_bootstrap_events_are_parsed_and_hidden_from_visible_log() -> None:
+    root = reset_root()
+
+    class StubProcess:
+        def __init__(self) -> None:
+            self.stdout = [
+                '@@BOOTSTRAP_EVENT@@ {"kind":"discovery_summary","payload":{"new":1,"exact_matches":2,"conflicts":1,"items":[{"filename":"clip.mp4","action":"processed separately","input_path":"G:/input/clip.mp4","existing_path":"G:/done/clip.mp4"}]}}\n',
+                "regular log line\n",
+            ]
+
+        def wait(self) -> int:
+            return 0
+
+        def poll(self) -> None:
+            return None
+
+    original_popen = bootstrap_runtime.subprocess.Popen
+    bootstrap_runtime.subprocess.Popen = lambda *args, **kwargs: StubProcess()
+    try:
+        with patched_log_path(root):
+            state = bootstrap_runtime.RuntimeState(bootstrap_runtime.DEFAULT_CONFIG)
+            state.run_subprocess(["python", "-u", "main.py"], "index")
+    finally:
+        bootstrap_runtime.subprocess.Popen = original_popen
+
+    assert state.discovery["new"] == 1
+    assert state.discovery["exact_matches"] == 2
+    assert state.discovery["conflicts"] == 1
+    assert state.discovery["items"][0]["filename"] == "clip.mp4"
+    assert not any("@@BOOTSTRAP_EVENT@@" in line for line in state.lines)
+    assert any("regular log line" in line for line in state.lines)
+
+
+def test_index_start_appends_reindex_flag_when_enabled() -> None:
+    captured: dict[str, object] = {}
+
+    class ImmediateThread:
+        def __init__(self, *, target, args=(), daemon=None):
+            self._target = target
+            self._args = args
+
+        def start(self) -> None:
+            self._target(*self._args)
+
+    state = bootstrap_runtime.RuntimeState(bootstrap_runtime.DEFAULT_CONFIG)
+    state.reindex_existing = True
+
+    original_thread = bootstrap_runtime.threading.Thread
+    original_run_subprocess = state.run_subprocess
+    bootstrap_runtime.threading.Thread = ImmediateThread
+    state.run_subprocess = lambda args, name: captured.update({"args": args, "name": name})
+    try:
+        state.start("index", {"input": "G:/videos"})
+    finally:
+        bootstrap_runtime.threading.Thread = original_thread
+        state.run_subprocess = original_run_subprocess
+
+    assert captured["name"] == "index"
+    assert captured["args"][-1] == "--reindex_existing"
+
+
+def test_render_page_preserves_input_across_forms_and_restores_log_scroll() -> None:
+    state = bootstrap_runtime.RuntimeState(bootstrap_runtime.DEFAULT_CONFIG)
+    state.input_path = "G:/llm-video-test"
+    handler = object.__new__(bootstrap_runtime.RuntimeHandler)
+    handler.state = state
+
+    page = handler.render_page()
+
+    assert '<form id="setup-form" method="post" action="/run/setup">' in page
+    assert '<form id="stop-form" method="post" action="/stop">' in page
+    assert 'name="input" value="G:/llm-video-test"' in page
+    assert 'const LOG_SCROLL_KEY = "bootstrap-runtime-log-scroll";' in page
+    assert 'const PAGE_SCROLL_KEY = "bootstrap-runtime-page-scroll";' in page
+    assert 'restorePageScrollState();' in page
+    assert 'restoreLogScrollState();' in page
+
+
 def main() -> None:
     tests = [
         test_build_command_args_uses_unbuffered_python_for_scripts,
         test_runtime_env_enables_unbuffered_python,
         test_run_subprocess_uses_line_buffered_text_mode,
+        test_bootstrap_events_are_parsed_and_hidden_from_visible_log,
+        test_index_start_appends_reindex_flag_when_enabled,
+        test_render_page_preserves_input_across_forms_and_restores_log_scroll,
     ]
     failures = []
     for test in tests:

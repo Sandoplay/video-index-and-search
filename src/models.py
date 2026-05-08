@@ -20,8 +20,10 @@ class SegmentMetadata:
 class VideoMetadata:
     video_path: str
     base_dir: str  # Path to the directory containing frames and audio
+    output_key: Optional[str] = None
     audio_path: Optional[str] = None
     duration: Optional[float] = None
+    source_metadata: Dict[str, Any] = field(default_factory=dict)
     transcription: Optional[str] = None
     summary: Optional[str] = None
     frames: List[FrameMetadata] = field(default_factory=list)

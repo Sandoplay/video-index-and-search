@@ -1,22 +1,51 @@
 import os
 import argparse
+import concurrent.futures
+import dataclasses
 import json
 import re
 import shutil
+import subprocess
 import time
 import torch
 import gc
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 from src.media_processor import MediaProcessor
 from src.transcriber import AudioTranscriber
 from src.vision_analyzer import VisionAnalyzer
 from src.models import VideoMetadata
 from src.indexer import VideoIndexer
-import concurrent.futures
 
 DEFAULT_COMPLETED_DIR_NAME = "indexed-videos"
 LEGACY_DEFAULT_COMPLETED_DIR = Path("data") / "completed_videos"
+DURATION_MATCH_TOLERANCE_SECONDS = 0.5
+BOOTSTRAP_EVENT_PREFIX = "@@BOOTSTRAP_EVENT@@ "
+
+
+@dataclasses.dataclass
+class ExistingAnalysisRecord:
+    result_path: str
+    video_path: str
+    output_key: str
+    source_metadata: dict[str, Any]
+
+
+@dataclasses.dataclass
+class PendingVideo:
+    video_path: str
+    output_key: str
+    source_metadata: dict[str, Any]
+    conflict_with: ExistingAnalysisRecord | None = None
+
+
+def emit_bootstrap_event(kind: str, **payload: Any) -> None:
+    if os.getenv("BOOTSTRAP_RUNTIME_EVENTS") != "1":
+        return
+    print(
+        BOOTSTRAP_EVENT_PREFIX + json.dumps({"kind": kind, **payload}, ensure_ascii=False),
+        flush=True,
+    )
 
 def cleanup_gpu():
     """Aggressively clean up GPU memory (mostly for Whisper/Torch)."""
@@ -53,11 +82,97 @@ def record_transcription_config(meta: VideoMetadata, config: dict):
     meta.timings["transcription_batch_size"] = config.get("batch_size")
     meta.timings["transcription_vad_filter"] = config.get("vad_filter")
 
-def sanitized_video_name(video_path: str) -> str:
+def sanitized_video_name(video_path: str, output_key: str | None = None) -> str:
+    if output_key:
+        return re.sub(r'[^\w\-]', '_', output_key)
     return re.sub(r'[^\w\-]', '_', Path(video_path).stem)
 
-def analysis_result_path(output_dir: str, video_path: str) -> str:
-    return os.path.join(output_dir, sanitized_video_name(video_path), "analysis_result.json")
+
+def analysis_result_path(output_dir: str, video_path: str, output_key: str | None = None) -> str:
+    return os.path.join(output_dir, sanitized_video_name(video_path, output_key), "analysis_result.json")
+
+
+def normalize_filename(filename: str) -> str:
+    return str(filename or "").strip().casefold()
+
+
+def metadata_duration_matches(left: Any, right: Any) -> bool:
+    try:
+        return abs(float(left) - float(right)) <= DURATION_MATCH_TOLERANCE_SECONDS
+    except (TypeError, ValueError):
+        return False
+
+
+def source_metadata_exact_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    if normalize_filename(left.get("filename", "")) != normalize_filename(right.get("filename", "")):
+        return False
+
+    left_size = left.get("filesize_bytes")
+    right_size = right.get("filesize_bytes")
+    if left_size is None or right_size is None or int(left_size) != int(right_size):
+        return False
+
+    return metadata_duration_matches(left.get("duration_seconds"), right.get("duration_seconds"))
+
+
+def source_metadata_conflict(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return normalize_filename(left.get("filename", "")) == normalize_filename(right.get("filename", ""))
+
+
+def default_output_key(video_path: str) -> str:
+    return sanitized_video_name(video_path)
+
+
+def conflict_output_key(video_path: str, source_metadata: dict[str, Any]) -> str:
+    size = int(source_metadata.get("filesize_bytes") or 0)
+    duration_ms = int(round(float(source_metadata.get("duration_seconds") or 0.0) * 1000))
+    return f"{default_output_key(video_path)}__{size}_{duration_ms}"
+
+
+def allocate_output_key(base_key: str, reserved_keys: set[str]) -> str:
+    if base_key not in reserved_keys:
+        return base_key
+
+    counter = 2
+    while True:
+        candidate = f"{base_key}_{counter}"
+        if candidate not in reserved_keys:
+            return candidate
+        counter += 1
+
+
+def ffprobe_executable() -> str:
+    bundled = Path("bin") / "ffprobe.exe"
+    return str(bundled) if bundled.exists() else "ffprobe"
+
+
+def probe_video_duration(video_path: str) -> float:
+    try:
+        cmd = [
+            ffprobe_executable(),
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            video_path,
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+        return float(str(result.stdout).strip())
+    except Exception as exc:
+        print(f"Warning: could not probe duration for {video_path}: {exc}")
+        return 0.0
+
+
+def collect_source_metadata(video_path: str, duration_seconds: float | None = None) -> dict[str, Any]:
+    path = Path(video_path)
+    duration = float(duration_seconds) if duration_seconds is not None else probe_video_duration(video_path)
+    return {
+        "filename": path.name,
+        "filesize_bytes": path.stat().st_size,
+        "duration_seconds": round(duration, 3),
+    }
 
 
 def merged_video_path_aliases(existing_aliases, *paths: str) -> list[str]:
@@ -67,6 +182,149 @@ def merged_video_path_aliases(existing_aliases, *paths: str) -> list[str]:
         if normalized and normalized not in aliases:
             aliases.append(normalized)
     return aliases
+
+
+def source_metadata_from_analysis_result(data: dict[str, Any], result_path: str) -> dict[str, Any]:
+    stored = data.get("source_metadata") or {}
+    filename = str(stored.get("filename") or Path(str(data.get("video_path") or result_path)).name).strip()
+
+    filesize = stored.get("filesize_bytes")
+    if filesize is None:
+        candidate_paths = [
+            data.get("video_path"),
+            (data.get("timings") or {}).get("source_video_path"),
+            (data.get("timings") or {}).get("archived_video_path"),
+        ]
+        for candidate in candidate_paths:
+            if not candidate:
+                continue
+            candidate_path = Path(str(candidate))
+            if candidate_path.exists() and candidate_path.is_file():
+                filesize = candidate_path.stat().st_size
+                break
+
+    duration = stored.get("duration_seconds", data.get("duration"))
+    normalized: dict[str, Any] = {"filename": filename}
+    if filesize is not None:
+        normalized["filesize_bytes"] = int(filesize)
+    if duration is not None:
+        try:
+            normalized["duration_seconds"] = round(float(duration), 3)
+        except (TypeError, ValueError):
+            pass
+    return normalized
+
+
+def scan_existing_analysis_catalog(output_dir: str) -> tuple[dict[str, list[ExistingAnalysisRecord]], set[str]]:
+    catalog: dict[str, list[ExistingAnalysisRecord]] = {}
+    used_output_keys: set[str] = set()
+    output_root = Path(output_dir)
+    if not output_root.exists():
+        return catalog, used_output_keys
+
+    json_files = sorted(output_root.rglob("analysis_result.json"))
+    for json_file in json_files:
+        used_output_keys.add(json_file.parent.name)
+        if not is_valid_analysis_result(str(json_file)):
+            continue
+        try:
+            with json_file.open("r", encoding="utf-8") as file:
+                data = json.load(file)
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        source_metadata = source_metadata_from_analysis_result(data, str(json_file))
+        filename_key = normalize_filename(source_metadata.get("filename", ""))
+        if not filename_key:
+            continue
+
+        record = ExistingAnalysisRecord(
+            result_path=str(json_file),
+            video_path=str(data.get("video_path") or ""),
+            output_key=json_file.parent.name,
+            source_metadata=source_metadata,
+        )
+        catalog.setdefault(filename_key, []).append(record)
+
+    return catalog, used_output_keys
+
+
+def discovery_summary_payload(new_count: int, exact_matches: int, conflicts: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "new": new_count,
+        "exact_matches": exact_matches,
+        "conflicts": len(conflicts),
+        "items": conflicts,
+    }
+
+
+def print_discovery_summary(summary: dict[str, Any]) -> None:
+    print(
+        ">>> Discovery summary: "
+        f"{summary['new']} new | "
+        f"{summary['exact_matches']} already analyzed exact match(es) | "
+        f"{summary['conflicts']} filename conflict(s)"
+    )
+
+
+def print_conflict_warning(conflict: dict[str, Any]) -> None:
+    print(f"[WARNING] Filename conflict: {conflict['filename']}")
+    print(
+        f"  input:    {conflict['input_path']} | "
+        f"{conflict['input_size_bytes']} bytes | {conflict['input_duration_seconds']:.3f}s"
+    )
+    print(
+        f"  existing: {conflict['existing_path']} | "
+        f"{conflict['existing_size_bytes']} bytes | {conflict['existing_duration_seconds']:.3f}s"
+    )
+    print("  action: processing separately; no existing output or DB rows overwritten")
+
+
+def discover_processing_plan(
+    discovered_video_paths: list[str],
+    output_dir: str,
+) -> tuple[list[PendingVideo], list[tuple[str, ExistingAnalysisRecord, dict[str, Any]]], dict[str, Any]]:
+    catalog, used_output_keys = scan_existing_analysis_catalog(output_dir)
+    reserved_output_keys = set(used_output_keys)
+    pending_videos: list[PendingVideo] = []
+    exact_matches: list[tuple[str, ExistingAnalysisRecord, dict[str, Any]]] = []
+    conflicts: list[dict[str, Any]] = []
+    new_count = 0
+
+    for path in discovered_video_paths:
+        source_metadata = collect_source_metadata(path)
+        filename_key = normalize_filename(source_metadata["filename"])
+        candidates = catalog.get(filename_key, [])
+        exact_match = next((candidate for candidate in candidates if source_metadata_exact_match(source_metadata, candidate.source_metadata)), None)
+        if exact_match is not None:
+            exact_matches.append((path, exact_match, source_metadata))
+            continue
+
+        if candidates:
+            existing = sorted(candidates, key=lambda item: item.result_path)[0]
+            output_key = allocate_output_key(conflict_output_key(path, source_metadata), reserved_output_keys)
+            reserved_output_keys.add(output_key)
+            conflict = {
+                "filename": source_metadata["filename"],
+                "input_path": path,
+                "existing_path": existing.video_path or existing.result_path,
+                "input_size_bytes": int(source_metadata.get("filesize_bytes") or 0),
+                "existing_size_bytes": int(existing.source_metadata.get("filesize_bytes") or 0),
+                "input_duration_seconds": float(source_metadata.get("duration_seconds") or 0.0),
+                "existing_duration_seconds": float(existing.source_metadata.get("duration_seconds") or 0.0),
+                "action": "processed separately",
+            }
+            conflicts.append(conflict)
+            pending_videos.append(PendingVideo(video_path=path, output_key=output_key, source_metadata=source_metadata, conflict_with=existing))
+            continue
+
+        new_count += 1
+        output_key = allocate_output_key(default_output_key(path), reserved_output_keys)
+        reserved_output_keys.add(output_key)
+        pending_videos.append(PendingVideo(video_path=path, output_key=output_key, source_metadata=source_metadata))
+
+    summary = discovery_summary_payload(new_count, len(exact_matches), conflicts)
+    return pending_videos, exact_matches, summary
 
 def is_valid_analysis_result(result_path: str) -> bool:
     if not os.path.exists(result_path):
@@ -95,6 +353,11 @@ def build_analysis_result(meta: VideoMetadata) -> dict:
         meta.timings.get("archived_video_path", ""),
         meta.video_path,
     )
+    if not meta.source_metadata:
+        meta.source_metadata = collect_source_metadata(
+            meta.timings.get("source_video_path") or meta.video_path,
+            duration_seconds=meta.duration,
+        )
     segments_data = [
         {
             "start_frame": segment.start_frame,
@@ -124,6 +387,7 @@ def build_analysis_result(meta: VideoMetadata) -> dict:
 
     return {
         "video_path": meta.video_path,
+        "source_metadata": meta.source_metadata,
         "duration": meta.duration,
         "transcription": meta.transcription,
         "transcription_config": meta.timings.get("transcription_config", {}),
@@ -229,9 +493,22 @@ def finalize_successful_video(meta: VideoMetadata, args) -> str:
     remove_original_video(original_path, archived_path, args)
     return result_path
 
-def finalize_existing_analysis(video_path: str, args) -> str:
-    result_path = analysis_result_path(args.output_dir, video_path)
+def finalize_existing_analysis(
+    video_path: str,
+    args,
+    result_path_override: str | None = None,
+    source_metadata: dict[str, Any] | None = None,
+) -> str:
+    result_path = result_path_override or analysis_result_path(args.output_dir, video_path)
     if not args.archive_completed_videos:
+        if source_metadata:
+            with open(result_path, "r", encoding="utf-8") as f:
+                result_data = json.load(f)
+            result_data["source_metadata"] = source_metadata
+            temp_path = f"{result_path}.tmp"
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(result_data, f, ensure_ascii=False, indent=4)
+            os.replace(temp_path, result_path)
         return result_path
 
     archived_path = copy_video_to_completed(video_path, args)
@@ -240,6 +517,8 @@ def finalize_existing_analysis(video_path: str, args) -> str:
 
     previous_video_path = str(result_data.get("video_path") or "").strip()
     result_data["video_path"] = archived_path
+    if source_metadata:
+        result_data["source_metadata"] = source_metadata
     timings = result_data.setdefault("timings", {})
     timings["source_video_path"] = video_path
     timings["archived_video_path"] = archived_path
@@ -283,24 +562,41 @@ def index_analysis_results(result_paths: List[str], args) -> None:
             del indexer
         cleanup_gpu()
 
-def process_batch(video_paths: List[str], args, existing_result_paths: Optional[List[str]] = None):
+def normalize_pending_video(item: str | PendingVideo) -> PendingVideo:
+    if isinstance(item, PendingVideo):
+        return item
+    return PendingVideo(
+        video_path=item,
+        output_key=default_output_key(item),
+        source_metadata=collect_source_metadata(item),
+    )
+
+
+def process_batch(video_paths: List[str | PendingVideo], args, existing_result_paths: Optional[List[str]] = None):
     pipeline_start = time.perf_counter()
     processor = MediaProcessor(output_root=args.output_dir)
+    pending_videos = [normalize_pending_video(item) for item in video_paths]
     videos_metadata: List[VideoMetadata] = []
     result_paths_to_index: List[str] = list(existing_result_paths or [])
     completed_metas: List[VideoMetadata] = []
     failed_metas: List[VideoMetadata] = []
 
     # --- Stage 1: Media Processing (FFmpeg) ---
-    print(f"\n>>> STAGE 1: Media Processing ({len(video_paths)} videos)")
+    print(f"\n>>> STAGE 1: Media Processing ({len(pending_videos)} videos)")
     stage1_start = time.perf_counter()
-    for path in video_paths:
+    for pending in pending_videos:
+        path = pending.video_path
         video_stage1_start = time.perf_counter()
         print(f"Processing: {os.path.basename(path)}")
-        meta = processor.prepare_video_metadata(path)
-        meta.audio_path = processor.extract_audio(path)
+        meta = processor.prepare_video_metadata(
+            path,
+            output_key=pending.output_key,
+            source_duration=float(pending.source_metadata.get("duration_seconds") or 0.0),
+        )
+        meta.source_metadata = dict(pending.source_metadata)
+        meta.audio_path = processor.extract_audio(path, output_key=pending.output_key)
         # Use adaptive extraction
-        meta.frames = processor.extract_frames(path, max_frames=args.max_frames)
+        meta.frames = processor.extract_frames(path, max_frames=args.max_frames, output_key=pending.output_key)
         meta.timings["media_processing_seconds"] = round(time.perf_counter() - video_stage1_start, 3)
         videos_metadata.append(meta)
         print(f"  Done. Extracted {len(meta.frames)} frames.")
@@ -615,6 +911,7 @@ def main():
     parser.add_argument("--embedding_table", default=None, help="Override LanceDB table for Stage 5 indexing")
     parser.add_argument("--embedding_ctx_size", type=int, default=None, help="llama-server context size for Stage 5 embedding indexing")
     parser.add_argument("--embedding_parallel", type=int, default=2, help="llama-server --parallel slots for Stage 5 embedding indexing")
+    parser.add_argument("--reindex_existing", action="store_true", help="Reindex already analyzed exact matches into LanceDB")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output for vision analysis")
     
     args = parser.parse_args()
@@ -640,30 +937,49 @@ def main():
         print("No video files found to process.")
         return
 
-    video_paths = []
+    pending_videos: list[PendingVideo] = []
     existing_result_paths = []
-    for path in discovered_video_paths:
-        result_path = analysis_result_path(args.output_dir, path)
-        if is_valid_analysis_result(result_path):
-            print(f"Skipping already analyzed video: {os.path.basename(path)}")
-            try:
-                existing_result_paths.append(finalize_existing_analysis(path, args))
-            except Exception as e:
-                print(f"  -> Warning: could not archive existing analyzed video {path}: {e}")
-                existing_result_paths.append(result_path)
-            continue
-        video_paths.append(path)
+    pending_videos, exact_matches, discovery_summary = discover_processing_plan(discovered_video_paths, args.output_dir)
+    emit_bootstrap_event("discovery_summary", payload=discovery_summary)
+    print_discovery_summary(discovery_summary)
+    for conflict in discovery_summary["items"]:
+        print_conflict_warning(conflict)
+        emit_bootstrap_event("discovery_conflict", payload=conflict)
 
-    if not video_paths:
+    for path, existing, source_metadata in exact_matches:
+        print(
+            "Skipping already analyzed video by exact metadata match: "
+            f"{source_metadata['filename']} | "
+            f"{source_metadata['filesize_bytes']} bytes | "
+            f"{source_metadata['duration_seconds']:.3f}s"
+        )
+        print(f"  existing result: {existing.result_path}")
+        try:
+            finalized_result_path = finalize_existing_analysis(
+                path,
+                args,
+                result_path_override=existing.result_path,
+                source_metadata=source_metadata,
+            )
+            if args.reindex_existing:
+                existing_result_paths.append(finalized_result_path)
+        except Exception as e:
+            print(f"  -> Warning: could not archive existing analyzed video {path}: {e}")
+            if args.reindex_existing:
+                existing_result_paths.append(existing.result_path)
+
+    if not pending_videos:
         print("No new or failed videos to process.")
         if existing_result_paths:
             index_analysis_results(existing_result_paths, args)
+        elif exact_matches:
+            print("Exact matches were skipped without reindexing. Use --reindex_existing to rebuild LanceDB from matching results.")
         return
 
-    print(f"Found {len(video_paths)} video(s) to process.")
+    print(f"Found {len(pending_videos)} video(s) to process.")
     if existing_result_paths:
-        print(f"Found {len(existing_result_paths)} already analyzed video(s) to index/confirm.")
-    process_batch(video_paths, args, existing_result_paths=existing_result_paths)
+        print(f"Found {len(existing_result_paths)} already analyzed video(s) queued for explicit reindex.")
+    process_batch(pending_videos, args, existing_result_paths=existing_result_paths)
 
 if __name__ == "__main__":
     main()

@@ -20,6 +20,7 @@ LOG_PATH = LOG_DIR / "bootstrap.log"
 VENV_PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 MENU_HOST = "127.0.0.1"
 MENU_PORT = 8765
+BOOTSTRAP_EVENT_PREFIX = "@@BOOTSTRAP_EVENT@@ "
 
 DEFAULT_CONFIG = {
     "default_embedding_backend": "qwen3-4b-gguf",
@@ -75,10 +76,57 @@ class RuntimeState:
         self.embedding_backend = normalize_embedding_backend(
             str(config.get("default_embedding_backend") or "qwen3-4b-gguf")
         )
+        self.reindex_existing = False
         self.lines: list[str] = []
         self.process: subprocess.Popen[str] | None = None
         self.lock = threading.Lock()
+        self.discovery = self.empty_discovery_state()
         LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def empty_discovery_state() -> dict:
+        return {
+            "new": 0,
+            "exact_matches": 0,
+            "conflicts": 0,
+            "items": [],
+        }
+
+    def reset_discovery(self) -> None:
+        with self.lock:
+            self.discovery = self.empty_discovery_state()
+
+    def apply_bootstrap_event(self, payload: dict) -> None:
+        kind = payload.get("kind")
+        body = payload.get("payload") or {}
+        with self.lock:
+            if kind == "discovery_summary":
+                self.discovery = {
+                    "new": int(body.get("new") or 0),
+                    "exact_matches": int(body.get("exact_matches") or 0),
+                    "conflicts": int(body.get("conflicts") or 0),
+                    "items": list(body.get("items") or []),
+                }
+            elif kind == "discovery_conflict":
+                items = list(self.discovery.get("items") or [])
+                if not any(
+                    str(item.get("input_path") or "") == str(body.get("input_path") or "")
+                    and str(item.get("existing_path") or "") == str(body.get("existing_path") or "")
+                    for item in items
+                ):
+                    items.append(body)
+                self.discovery["items"] = items
+                self.discovery["conflicts"] = len(items)
+
+    def handle_subprocess_line(self, line: str) -> bool:
+        if not line.startswith(BOOTSTRAP_EVENT_PREFIX):
+            return False
+        try:
+            payload = json.loads(line[len(BOOTSTRAP_EVENT_PREFIX):])
+        except json.JSONDecodeError:
+            return False
+        self.apply_bootstrap_event(payload)
+        return True
 
     def log(self, message: str) -> None:
         print(message, flush=True)
@@ -105,6 +153,8 @@ class RuntimeState:
         if not command:
             self.log(f"Command is missing in bootstrap_config.json: {name}")
             return
+        if name == "index":
+            self.reset_discovery()
 
         args = build_command_args(
             command,
@@ -113,6 +163,8 @@ class RuntimeState:
                 **(replacements or {}),
             },
         )
+        if name == "index" and self.reindex_existing:
+            args.append("--reindex_existing")
         threading.Thread(target=self.run_subprocess, args=(args, name), daemon=True).start()
 
     def run_subprocess(self, args: list[str], name: str) -> None:
@@ -141,7 +193,10 @@ class RuntimeState:
                 threading.Thread(target=open_search_ui_after_delay, daemon=True).start()
             assert self.process.stdout is not None
             for line in self.process.stdout:
-                self.log(line.rstrip())
+                stripped = line.rstrip()
+                if self.handle_subprocess_line(stripped):
+                    continue
+                self.log(stripped)
             exit_code = self.process.wait()
             if exit_code == 0:
                 self.log("Command finished successfully.")
@@ -171,6 +226,7 @@ class RuntimeHandler(BaseHTTPRequestHandler):
         self.state.embedding_backend = normalize_embedding_backend(
             form.get("embedding_backend", [self.state.embedding_backend])[0]
         )
+        self.state.reindex_existing = form.get("reindex_existing", [""])[0].lower() in {"1", "true", "on", "yes"}
 
         if self.path == "/run/setup":
             self.state.start("setup")
@@ -208,12 +264,15 @@ class RuntimeHandler(BaseHTTPRequestHandler):
     def status_payload(self) -> dict:
         with self.state.lock:
             lines = list(self.state.lines)
+            discovery = dict(self.state.discovery)
         busy = self.state.is_busy()
         return {
             "busy": busy,
             "status": "Running" if busy else "Ready",
             "input_path": self.state.input_path,
             "embedding_backend": self.state.embedding_backend,
+            "reindex_existing": self.state.reindex_existing,
+            "discovery": discovery,
             "log": "\n".join(lines),
         }
 
@@ -225,6 +284,7 @@ class RuntimeHandler(BaseHTTPRequestHandler):
         stop_disabled = "" if busy else "disabled"
         input_value = escape(self.state.input_path, quote=True)
         embedding_value = self.state.embedding_backend
+        reindex_checked = "checked" if self.state.reindex_existing else ""
         embedding_options = "\n".join(
             f'<option value="{escape(value, quote=True)}" {"selected" if value == embedding_value else ""}>{escape(label)}</option>'
             for value, label in EMBEDDING_BACKENDS.items()
@@ -342,6 +402,75 @@ class RuntimeHandler(BaseHTTPRequestHandler):
       color: var(--muted);
       font-weight: 700;
     }}
+    .discovery-panel {{
+      display: grid;
+      gap: 12px;
+      margin-bottom: 18px;
+    }}
+    .alert-box {{
+      display: none;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      color: var(--ink);
+      font-weight: 700;
+    }}
+    .alert-box.visible {{
+      display: block;
+    }}
+    .discovery-summary {{
+      display: none;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }}
+    .discovery-summary.visible {{
+      display: grid;
+    }}
+    .summary-card {{
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }}
+    .summary-card strong {{
+      display: block;
+      font-size: 1.25rem;
+    }}
+    .summary-card span {{
+      color: var(--muted);
+      font-size: 0.88rem;
+      font-weight: 700;
+    }}
+    .conflict-list {{
+      display: none;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }}
+    .conflict-list.visible {{
+      display: block;
+    }}
+    .conflict-list li {{
+      padding: 10px 14px;
+      border-top: 1px solid var(--line);
+      background: var(--panel);
+    }}
+    .conflict-list li:first-child {{
+      border-top: 0;
+    }}
+    .conflict-list strong {{
+      display: block;
+      margin-bottom: 2px;
+    }}
+    .conflict-list span {{
+      color: var(--muted);
+      font-size: 0.88rem;
+      font-weight: 700;
+    }}
     section {{
       padding: 0 0 22px;
       border-bottom: 1px solid var(--line);
@@ -349,7 +478,7 @@ class RuntimeHandler(BaseHTTPRequestHandler):
     }}
     .controls {{
       display: grid;
-      grid-template-columns: minmax(240px, 1fr) minmax(180px, auto) auto auto auto auto;
+      grid-template-columns: minmax(240px, 1fr) minmax(180px, auto) minmax(220px, auto) auto auto auto auto;
       gap: 10px;
       align-items: end;
     }}
@@ -386,6 +515,27 @@ class RuntimeHandler(BaseHTTPRequestHandler):
       box-shadow: 0 0 0 3px var(--focus);
     }}
     form {{ margin: 0; }}
+    .checkbox-label {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 52px;
+      padding: 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--ink);
+      font-size: 0.92rem;
+      font-weight: 700;
+    }}
+    .checkbox-label input {{
+      width: 18px;
+      min-height: auto;
+      height: 18px;
+      margin: 0;
+      padding: 0;
+      flex: 0 0 auto;
+    }}
     button {{
       min-height: 52px;
       border: 0;
@@ -460,6 +610,15 @@ class RuntimeHandler(BaseHTTPRequestHandler):
   </header>
   <section>
     <div id="status" class="status">Status: {status}</div>
+    <div class="discovery-panel">
+      <div id="discovery-alert" class="alert-box"></div>
+      <div id="discovery-summary" class="discovery-summary">
+        <div class="summary-card"><strong id="discovery-new">0</strong><span>New</span></div>
+        <div class="summary-card"><strong id="discovery-exact">0</strong><span>Exact matches</span></div>
+        <div class="summary-card"><strong id="discovery-conflicts">0</strong><span>Filename conflicts</span></div>
+      </div>
+      <ul id="discovery-conflict-list" class="conflict-list"></ul>
+    </div>
     <div class="controls">
       <form id="index-form" method="post" action="/run/index">
         <label>Input videos
@@ -471,14 +630,24 @@ class RuntimeHandler(BaseHTTPRequestHandler):
           {embedding_options}
         </select>
       </label>
-      <form method="post" action="/run/setup"><button class="secondary action-button" {disabled}>Setup models / binaries</button></form>
+      <label class="checkbox-label">
+        <input form="index-form" type="checkbox" name="reindex_existing" value="1" {reindex_checked}>
+        Reindex exact matches
+      </label>
+      <form id="setup-form" method="post" action="/run/setup">
+        <input type="hidden" name="input" value="{input_value}">
+        <button class="secondary action-button" {disabled}>Setup models / binaries</button>
+      </form>
       <button class="action-button" form="index-form" {disabled}>Index videos</button>
       <form id="web-form" method="post" action="/run/web">
         <input type="hidden" name="input" value="{input_value}">
         <input type="hidden" name="embedding_backend" value="{embedding_value}">
         <button class="secondary action-button" {disabled}>Run web search UI</button>
       </form>
-      <form method="post" action="/stop"><button id="stop-button" class="danger" {stop_disabled}>Stop</button></form>
+      <form id="stop-form" method="post" action="/stop">
+        <input type="hidden" name="input" value="{input_value}">
+        <button id="stop-button" class="danger" {stop_disabled}>Stop</button>
+      </form>
     </div>
   </section>
   <section>
@@ -490,9 +659,19 @@ class RuntimeHandler(BaseHTTPRequestHandler):
   const themeLabel = themeToggle.querySelector(".theme-label");
   const statusEl = document.querySelector("#status");
   const logEl = document.querySelector("#runtime-log");
+  const LOG_SCROLL_KEY = "bootstrap-runtime-log-scroll";
+  const PAGE_SCROLL_KEY = "bootstrap-runtime-page-scroll";
+  const discoveryAlert = document.querySelector("#discovery-alert");
+  const discoverySummary = document.querySelector("#discovery-summary");
+  const discoveryNew = document.querySelector("#discovery-new");
+  const discoveryExact = document.querySelector("#discovery-exact");
+  const discoveryConflicts = document.querySelector("#discovery-conflicts");
+  const discoveryConflictList = document.querySelector("#discovery-conflict-list");
   const actionButtons = Array.from(document.querySelectorAll(".action-button"));
   const stopButton = document.querySelector("#stop-button");
   const embeddingSelect = document.querySelector("select[name='embedding_backend']");
+  const reindexExisting = document.querySelector("#index-form input[name='reindex_existing']");
+  const mirroredInputTargets = Array.from(document.querySelectorAll('form:not(#index-form) input[name="input"]'));
   const webEmbeddingInput = document.querySelector("#web-form input[name='embedding_backend']");
   const webInputPath = document.querySelector("#web-form input[name='input']");
   const inputPath = document.querySelector("#index-form input[name='input']");
@@ -522,6 +701,73 @@ class RuntimeHandler(BaseHTTPRequestHandler):
   applyTheme(preferredTheme());
 
   let lastLog = logEl.textContent;
+  function currentLogScrollState() {{
+    const nearBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 24;
+    return nearBottom ? "bottom" : String(logEl.scrollTop);
+  }}
+
+  function saveLogScrollState() {{
+    sessionStorage.setItem(LOG_SCROLL_KEY, currentLogScrollState());
+  }}
+
+  function restoreLogScrollState() {{
+    const saved = sessionStorage.getItem(LOG_SCROLL_KEY);
+    if (!saved) {{
+      logEl.scrollTop = logEl.scrollHeight;
+      return;
+    }}
+    if (saved === "bottom") {{
+      logEl.scrollTop = logEl.scrollHeight;
+      return;
+    }}
+    const scrollTop = Number.parseInt(saved, 10);
+    if (Number.isFinite(scrollTop)) {{
+      logEl.scrollTop = scrollTop;
+    }}
+  }}
+
+  function savePageScrollState() {{
+    sessionStorage.setItem(PAGE_SCROLL_KEY, String(window.scrollY || window.pageYOffset || 0));
+  }}
+
+  function restorePageScrollState() {{
+    const saved = sessionStorage.getItem(PAGE_SCROLL_KEY);
+    if (!saved) {{
+      return;
+    }}
+    const scrollTop = Number.parseInt(saved, 10);
+    if (Number.isFinite(scrollTop)) {{
+      window.scrollTo(0, scrollTop);
+    }}
+  }}
+
+  function renderDiscovery(discovery) {{
+    const data = discovery || {{ new: 0, exact_matches: 0, conflicts: 0, items: [] }};
+    const hasAny = (data.new || data.exact_matches || data.conflicts);
+    discoverySummary.classList.toggle("visible", Boolean(hasAny));
+    discoveryNew.textContent = String(data.new || 0);
+    discoveryExact.textContent = String(data.exact_matches || 0);
+    discoveryConflicts.textContent = String(data.conflicts || 0);
+
+    const items = Array.isArray(data.items) ? data.items : [];
+    if (items.length) {{
+      discoveryAlert.classList.add("visible");
+      discoveryAlert.textContent = `${{items.length}} filename conflict${{items.length === 1 ? "" : "s"}} detected. Existing output and DB rows are not being overwritten.`;
+      discoveryConflictList.classList.add("visible");
+      discoveryConflictList.innerHTML = items.map((item) => `
+        <li>
+          <strong>${{item.filename || "Unnamed file"}}</strong>
+          <span>${{item.action || "processed separately"}}</span>
+        </li>
+      `).join("");
+    }} else {{
+      discoveryAlert.classList.remove("visible");
+      discoveryAlert.textContent = "";
+      discoveryConflictList.classList.remove("visible");
+      discoveryConflictList.innerHTML = "";
+    }}
+  }}
+
   async function refreshStatus() {{
     try {{
       const response = await fetch("/api/status", {{ cache: "no-store" }});
@@ -530,6 +776,7 @@ class RuntimeHandler(BaseHTTPRequestHandler):
       }}
       const payload = await response.json();
       statusEl.textContent = `Status: ${{payload.status}}`;
+      renderDiscovery(payload.discovery);
       if (payload.log !== lastLog) {{
         const shouldStickToBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 24;
         logEl.textContent = payload.log;
@@ -546,6 +793,9 @@ class RuntimeHandler(BaseHTTPRequestHandler):
         embeddingSelect.value = payload.embedding_backend;
         webEmbeddingInput.value = payload.embedding_backend;
       }}
+      if (typeof payload.reindex_existing === "boolean") {{
+        reindexExisting.checked = payload.reindex_existing;
+      }}
     }} catch (error) {{
       statusEl.textContent = "Status: disconnected";
     }}
@@ -557,9 +807,23 @@ class RuntimeHandler(BaseHTTPRequestHandler):
 
   inputPath.addEventListener("input", () => {{
     webInputPath.value = inputPath.value;
+    for (const target of mirroredInputTargets) {{
+      target.value = inputPath.value;
+    }}
   }});
 
+  logEl.addEventListener("scroll", saveLogScrollState);
+  window.addEventListener("scroll", savePageScrollState);
+  for (const form of document.querySelectorAll("form")) {{
+    form.addEventListener("submit", () => {{
+      saveLogScrollState();
+      savePageScrollState();
+    }});
+  }}
+
   window.setInterval(refreshStatus, 500);
+  restorePageScrollState();
+  restoreLogScrollState();
   refreshStatus();
 </script>
 </body>
@@ -587,6 +851,7 @@ def runtime_env() -> dict[str, str]:
     scripts_dir = ROOT / ".venv" / "Scripts"
     env["PATH"] = str(scripts_dir) + os.pathsep + env.get("PATH", "")
     env["PYTHONUNBUFFERED"] = "1"
+    env["BOOTSTRAP_RUNTIME_EVENTS"] = "1"
     return env
 
 
