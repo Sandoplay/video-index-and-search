@@ -131,6 +131,7 @@ class AnalysisLibrary:
         return result
 
     def _preview_path(self, data: Dict[str, Any], result: Dict[str, Any], json_dir: Path) -> Optional[str]:
+        # Legacy fallback for older analysis_result.json files.
         analysis = data.get("analysis") or []
         timestamp = float(result.get("timestamp") or 0.0)
 

@@ -105,9 +105,10 @@ class FakeVisionAnalyzer:
     started_events = {}
     release_events = {}
     stopped = False
+    last_init = {}
 
     def __init__(self, *args, **kwargs):
-        pass
+        type(self).last_init = {"args": args, "kwargs": kwargs}
 
     def __enter__(self):
         return self
@@ -168,6 +169,7 @@ def patched_pipeline():
     FakeVisionAnalyzer.started_events = {}
     FakeVisionAnalyzer.release_events = {}
     FakeVisionAnalyzer.stopped = False
+    FakeVisionAnalyzer.last_init = {}
 
     pipeline.MediaProcessor = FakeMediaProcessor
     pipeline.AudioTranscriber = FakeAudioTranscriber
@@ -207,6 +209,7 @@ def make_args(
     input_dir: Path | None = None,
     completed_dir: Path | None = None,
     reindex_existing: bool = False,
+    mmproj_model: str = "models/mmproj-F16.gguf",
 ):
     input_dir = input_dir or (root / "input")
     completed_dir = completed_dir or (root / "completed")
@@ -216,6 +219,7 @@ def make_args(
         completed_dir=str(completed_dir),
         archive_completed_videos=archive_completed_videos,
         vlm_model="models/fake.gguf",
+        mmproj_model=mmproj_model,
         whisper_backend="fake",
         whisper_model="fake",
         whisper_beam_size=1,
@@ -311,6 +315,7 @@ def test_success_archives_deletes_source_and_indexes():
         "filesize_bytes": len(b"fake video"),
         "duration_seconds": 1.0,
     }
+    assert "analysis" not in data
     assert pipeline.is_valid_analysis_result(str(result))
     assert FakeVideoIndexer.indexed_paths == [str(result)]
     assert args.archive_completed_videos is True
@@ -818,6 +823,18 @@ def test_main_recovers_valid_json_with_source_left_after_delete_failure():
     assert FakeVideoIndexer.indexed_paths == []
 
 
+def test_process_batch_passes_explicit_mmproj_to_vision_analyzer():
+    root = reset_root("mmproj_passthrough")
+    video = make_video(root, "mmproj.mp4")
+    args = make_args(root, mmproj_model="models/mmproj-F16-4B.gguf")
+
+    with patched_pipeline():
+        run_batch(root, [video], args)
+
+    assert FakeVisionAnalyzer.last_init["kwargs"]["model_id"] == "models/fake.gguf"
+    assert FakeVisionAnalyzer.last_init["kwargs"]["mmproj_path"] == "models/mmproj-F16-4B.gguf"
+
+
 def test_async_finalizer_does_not_block_next_vlm_submit():
     root = reset_root("async_finalizer")
     first = make_video(root, "first.mp4")
@@ -961,6 +978,7 @@ TESTS = [
     test_write_failure_after_copy_keeps_source_and_does_not_index,
     test_remove_failure_after_json_keeps_source_and_does_not_index_until_next_run,
     test_main_recovers_valid_json_with_source_left_after_delete_failure,
+    test_process_batch_passes_explicit_mmproj_to_vision_analyzer,
     test_async_finalizer_does_not_block_next_vlm_submit,
     test_worker_keyboard_interrupt_saves_completed_and_leaves_active_for_retry,
     test_main_thread_keyboard_interrupt_during_wait_keeps_active_for_retry,

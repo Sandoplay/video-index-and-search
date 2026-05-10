@@ -369,22 +369,6 @@ def build_analysis_result(meta: VideoMetadata) -> dict:
         for segment in meta.segments
     ]
 
-    legacy_analysis = []
-    if meta.segments:
-        for segment in meta.segments:
-            frame_index = max(0, min(segment.start_frame, len(meta.frames) - 1)) if meta.frames else 0
-            frame_path = meta.frames[frame_index].path if meta.frames else ""
-            legacy_analysis.append({
-                "timestamp": segment.start_time,
-                "description": segment.description,
-                "frame_path": frame_path
-            })
-    else:
-        legacy_analysis = [
-            {"timestamp": f.timestamp, "description": f.description, "frame_path": f.path}
-            for f in meta.frames
-        ]
-
     return {
         "video_path": meta.video_path,
         "source_metadata": meta.source_metadata,
@@ -393,7 +377,6 @@ def build_analysis_result(meta: VideoMetadata) -> dict:
         "transcription_config": meta.timings.get("transcription_config", {}),
         "summary": meta.summary or "Summary generation failed.",
         "segments": segments_data,
-        "analysis": legacy_analysis,
         "timings": meta.timings
     }
 
@@ -720,7 +703,12 @@ def process_batch(video_paths: List[str | PendingVideo], args, existing_result_p
             raise
 
     try:
-        with VisionAnalyzer(model_id=model_path, verbose=args.verbose, parallel_slots=server_parallel_slots) as analyzer:
+        with VisionAnalyzer(
+            model_id=model_path,
+            mmproj_path=args.mmproj_model,
+            verbose=args.verbose,
+            parallel_slots=server_parallel_slots,
+        ) as analyzer:
             # Використовуємо ThreadPoolExecutor для паралельних запитів.
             # max_workers має дорівнювати параметру --parallel у сервері!
             print(f">>> VLM timing note: per-video wall time includes HTTP wait, prompt processing, generation, and any server-slot queueing.")
@@ -891,6 +879,7 @@ def main():
 
     parser.add_argument("--vlm_model", type=str, default="models/Qwen3.5-9B-UD-Q4_K_XL.gguf", help="Path to GGUF model")
     #parser.add_argument("--vlm_model", type=str, default="models/Qwen3.5-9B-Q8_0.gguf", help="Path to GGUF model")
+    parser.add_argument("--mmproj_model", type=str, default="models/mmproj-F16.gguf", help="Path to mmproj GGUF for the selected vision model")
 
     parser.add_argument("--whisper_backend", choices=["faster", "openai"], default="faster", help="Whisper backend")
     parser.add_argument("--whisper_model", type=str, default="turbo", help="Whisper model size/name")

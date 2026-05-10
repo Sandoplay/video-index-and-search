@@ -173,6 +173,7 @@ class VideoIndexer:
                         "type": "segment",
                     })
         else:
+            # Legacy fallback for older analysis_result.json files.
             analysis = data.get("analysis", [])
             if analysis:
                 for i, frame in enumerate(analysis):

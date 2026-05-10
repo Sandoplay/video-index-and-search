@@ -56,9 +56,16 @@ class VisionAnalyzer:
         "additionalProperties": False
     }
 
-    def __init__(self, model_id: str = "models/Qwen3.5-9B-Q8_0.gguf", load_in_4bit: bool = False, verbose: bool = False, parallel_slots: int = 2):
+    def __init__(
+        self,
+        model_id: str = "models/Qwen3.5-9B-Q8_0.gguf",
+        mmproj_path: str = "models/mmproj-F16.gguf",
+        load_in_4bit: bool = False,
+        verbose: bool = False,
+        parallel_slots: int = 2,
+    ):
         self.model_path = model_id
-        self.mmproj_path = "models/mmproj-F16.gguf"
+        self.mmproj_path = mmproj_path
         self.server_process = None
         self.api_url = "http://127.0.0.1:8080/v1/chat/completions"
         self.torch_lib = os.path.join(os.getcwd(), ".venv", "Lib", "site-packages", "torch", "lib")

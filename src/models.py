@@ -29,4 +29,3 @@ class VideoMetadata:
     frames: List[FrameMetadata] = field(default_factory=list)
     segments: List[SegmentMetadata] = field(default_factory=list)
     timings: Dict[str, Any] = field(default_factory=dict)
-    analysis_results: Optional[str] = None
